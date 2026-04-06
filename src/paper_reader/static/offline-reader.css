@@ -1,0 +1,175 @@
+.offline-body {
+  min-width: 320px;
+}
+
+.offline-page-shell {
+  width: min(100vw - 18px, 1780px);
+}
+
+.offline-search {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.offline-search span {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.offline-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.offline-workspace {
+  height: clamp(760px, 96dvh, 1200px);
+}
+
+.offline-sidebar,
+.offline-viewer {
+  background: var(--surface-strong);
+}
+
+.offline-viewer {
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+}
+
+.offline-paper-tree {
+  min-height: 0;
+}
+
+.offline-viewer-root,
+#offline-viewer-root {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+#offline-viewer-root.offline-viewer-content {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+#offline-viewer-root.offline-viewer-content > .main-viewer,
+#offline-viewer-root.offline-viewer-content > .text-viewer,
+#offline-viewer-root.offline-viewer-content > .prompt-viewer,
+#offline-viewer-root.offline-viewer-content > .offline-source-pane,
+#offline-viewer-root.offline-viewer-content > .viewer-empty {
+  min-height: 0;
+  height: 100%;
+}
+
+.offline-viewer-head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.offline-viewer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.offline-source-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.offline-source-pane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  height: 100%;
+}
+
+.offline-source-pane > .main-viewer,
+.offline-source-pane > .text-viewer {
+  min-height: 0;
+  height: 100%;
+}
+
+.offline-source-actions .button-link {
+  width: auto;
+}
+
+.offline-hidden {
+  display: none !important;
+}
+
+.offline-list-empty {
+  display: grid;
+  place-items: center;
+  min-height: 180px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.offline-viewer .text-viewer,
+.offline-viewer .prompt-viewer {
+  overflow: auto;
+}
+
+@media (max-width: 820px) {
+  .offline-workspace {
+    height: auto;
+    min-height: auto;
+  }
+
+  #offline-viewer-root.offline-viewer-content {
+    height: auto;
+    min-height: calc(100dvh - 120px);
+  }
+
+  #offline-viewer-root.offline-viewer-content > .main-viewer,
+  #offline-viewer-root.offline-viewer-content > .text-viewer,
+  #offline-viewer-root.offline-viewer-content > .prompt-viewer,
+  #offline-viewer-root.offline-viewer-content > .offline-source-pane {
+    min-height: 68dvh;
+    height: auto;
+  }
+}
+
+@media (max-width: 640px) {
+  .offline-page-shell {
+    width: calc(100vw - 8px);
+  }
+
+  .offline-stats {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .offline-viewer-head-row {
+    flex-direction: column;
+    gap: 6px;
+    align-items: flex-start;
+  }
+
+  .offline-source-actions {
+    margin-bottom: 6px;
+  }
+
+  #offline-viewer-root.offline-viewer-content {
+    min-height: calc(100dvh - 110px);
+  }
+
+  #offline-viewer-root.offline-viewer-content > .main-viewer,
+  #offline-viewer-root.offline-viewer-content > .text-viewer,
+  #offline-viewer-root.offline-viewer-content > .prompt-viewer,
+  #offline-viewer-root.offline-viewer-content > .offline-source-pane {
+    min-height: 72dvh;
+  }
+}

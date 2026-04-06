@@ -1,0 +1,1090 @@
+{% extends 'base.html' %}
+{% block title %}论文阅读器{% endblock %}
+{% block content %}
+<section class="workspace-shell">
+  <aside class="sidebar-pane card">
+    <div class="sidebar-head">
+      <p class="eyebrow">Library</p>
+      <h2><span id="paper-count">{{ papers|length }}</span> 篇论文</h2>
+      <p class="sidebar-copy">左侧只保留紧凑信息，重点阅读区放在右侧。</p>
+      <form class="sidebar-toggle-form" action="{{ url_for('index') }}" method="get">
+        <input type="hidden" name="folder" value="{{ current_folder }}">
+        <input type="hidden" name="q" value="{{ query }}">
+        <input type="hidden" name="sort" value="{{ sort_by }}">
+        <input type="hidden" name="paper" value="{{ selected_paper.rel_path if selected_paper else '' }}">
+        <input type="hidden" name="tab" value="{{ selected_tab }}">
+        <label class="checkbox-line done-toggle-line">
+          <input type="checkbox" name="show_done" value="1" {% if show_done %}checked{% endif %} onchange="this.form.submit()">
+          显示 DONE 论文
+        </label>
+      </form>
+    </div>
+
+    {% if papers %}
+      <div class="paper-tree-scroll" id="paper-tree-scroll">
+        <div class="paper-compact-list paper-group-tree" id="paper-list" data-sort="{{ sort_by }}">
+          {% for year_group in sidebar_groups %}
+            <details class="paper-year-group" data-year-key="{{ year_group.key }}" {% if year_group.is_open %}open{% endif %}>
+              <summary>
+                <span>{{ year_group.label }}</span>
+                <small>{{ year_group.count }}</small>
+              </summary>
+              <div class="paper-month-group-list">
+                {% for month_group in year_group.months %}
+                  <details class="paper-month-group" data-year-key="{{ year_group.key }}" data-month-key="{{ month_group.key }}" {% if month_group.is_open %}open{% endif %}>
+                    <summary>
+                      <span>{{ month_group.label }}</span>
+                      <small>{{ month_group.count }}</small>
+                    </summary>
+                    <div class="paper-month-list">
+                      {% for paper in month_group.papers %}
+                        <a
+                          class="paper-row {% if selected_paper and paper.rel_path == selected_paper.rel_path %}active{% endif %}"
+                          data-rel-path="{{ paper.rel_path }}"
+                          data-display-title="{{ paper.display_title|lower }}"
+                          data-file-name="{{ paper.file_name|lower }}"
+                          data-sort-date="{{ paper.sort_date or '' }}"
+                          data-folder="{{ paper.folder }}"
+                          data-done="{{ 1 if paper.is_done else 0 }}"
+                          data-year-key="{{ year_group.key }}"
+                          data-month-key="{{ month_group.key }}"
+                          href="{{ url_for('index', folder=current_folder, q=query, sort=sort_by, paper=paper.rel_path, tab=selected_tab if selected_paper and paper.rel_path == selected_paper.rel_path else 'source', show_done='1' if show_done else None) }}"
+                        >
+                          <div class="paper-row-top">
+                            <span class="paper-row-type">{{ paper.extension }}</span>
+                            {% if paper.extracted_date %}
+                              <span class="paper-row-date">{{ paper.extracted_date }}</span>
+                            {% endif %}
+                          </div>
+                          <strong class="paper-row-title">{{ paper.display_title }}</strong>
+                          <span class="paper-row-file">{{ paper.file_name }}</span>
+                          <div class="paper-row-bottom">
+                            <div class="paper-row-flags">
+                              {% if paper.folder %}<span class="paper-row-folder">{{ paper.folder }}</span>{% endif %}
+                              {% if paper.is_done %}<span class="paper-row-done">DONE</span>{% endif %}
+                            </div>
+                            <span class="paper-row-summary">{{ paper.prompt_result_count }}/{{ active_prompt_count }}</span>
+                          </div>
+                        </a>
+                      {% endfor %}
+                    </div>
+                  </details>
+                {% endfor %}
+              </div>
+            </details>
+          {% endfor %}
+        </div>
+      </div>
+    {% else %}
+      <div class="compact-empty" id="paper-list-empty">
+        <h3>没有匹配结果</h3>
+        <p>展开底部工具区后可以上传文件、建文件夹、管理 Prompt、DONE 状态或调整检索条件。</p>
+      </div>
+    {% endif %}
+  </aside>
+
+  <section class="viewer-pane card">
+    {% if selected_paper %}
+      <div class="viewer-head">
+        <div>
+          <p class="eyebrow">Reader</p>
+          <h2>{{ selected_paper.display_title }}</h2>
+          <p class="viewer-subtitle">{{ selected_paper.file_name }}</p>
+        </div>
+        <div class="viewer-meta">
+          {% if selected_paper.extracted_date %}<span>{{ selected_paper.extracted_date }}</span>{% endif %}
+          <span>{{ format_bytes(selected_paper.file_size) }}</span>
+          <span>{{ selected_paper.prompt_result_count }}/{{ active_prompt_count }} 个 Prompt 已完成</span>
+          <form action="{{ url_for('done_toggle_route') }}" method="post" class="inline-form">
+            <input type="hidden" name="folder" value="{{ current_folder }}">
+            <input type="hidden" name="q" value="{{ query }}">
+            <input type="hidden" name="sort" value="{{ sort_by }}">
+            <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+            <input type="hidden" name="rel_path" value="{{ selected_paper.rel_path }}">
+            <input type="hidden" name="tab" value="{{ selected_tab }}">
+            <button type="submit" class="secondary">{% if selected_paper.is_done %}恢复为未完成{% else %}标记 DONE{% endif %}</button>
+          </form>
+        </div>
+      </div>
+
+      <div class="viewer-tabs">
+        <a
+          class="viewer-tab {% if selected_tab == 'source' %}active{% endif %}"
+          href="{{ url_for('index', folder=current_folder, q=query, sort=sort_by, paper=selected_paper.rel_path, tab='source', show_done='1' if show_done else None) }}"
+        >
+          源文件
+        </a>
+        {% for tab in viewer_tabs %}
+          <a
+            class="viewer-tab {% if selected_tab == tab.slug %}active{% endif %} {% if not tab.exists %}pending{% endif %}"
+            href="{{ url_for('index', folder=current_folder, q=query, sort=sort_by, paper=selected_paper.rel_path, tab=tab.slug, show_done='1' if show_done else None) }}"
+          >
+            <span>{{ tab.name }}</span>
+            <small>
+              {% if tab.job_status == 'running' %}
+                处理中 {{ tab.job_progress }}%
+              {% elif tab.job_status == 'queued' %}
+                已排队
+              {% elif tab.exists %}
+                已生成
+              {% else %}
+                未应用
+              {% endif %}
+            </small>
+          </a>
+        {% endfor %}
+      </div>
+
+      {% if selected_tab == 'source' %}
+        {% if selected_paper.preview_kind == 'pdf' %}
+          <div class="source-viewer">
+            <div class="source-viewer-head">
+              <div>
+                <strong>源文件</strong>
+                <span>PDF 原文预览</span>
+              </div>
+              <div class="prompt-viewer-actions">
+                <a class="button-link secondary" href="{{ url_for('serve_file', rel_path=selected_paper.rel_path) }}" target="_blank" rel="noreferrer">打开原文件</a>
+              </div>
+            </div>
+            <iframe class="main-viewer" title="{{ selected_paper.display_title }}" src="{{ url_for('serve_file', rel_path=selected_paper.rel_path) }}"></iframe>
+          </div>
+        {% elif selected_paper.preview_kind == 'docx' %}
+          <div class="source-viewer source-text-viewer">
+            <div class="source-viewer-head">
+              <div>
+                <strong>源文件</strong>
+                <span>Word 文档预览</span>
+              </div>
+              <div class="prompt-viewer-actions">
+                <a class="button-link secondary" href="{{ url_for('serve_file', rel_path=selected_paper.rel_path) }}" target="_blank" rel="noreferrer">打开原文件</a>
+              </div>
+            </div>
+            <div class="source-viewer-body docx-preview wide">
+              {% for paragraph in preview_paragraphs %}
+                <p>{{ paragraph }}</p>
+              {% else %}
+                <p>没有提取到可预览的内容。</p>
+              {% endfor %}
+            </div>
+          </div>
+        {% elif selected_paper.preview_kind == 'doc' %}
+          <div class="source-viewer source-text-viewer">
+            <div class="source-viewer-head">
+              <div>
+                <strong>源文件</strong>
+                <span>DOC 文件预览</span>
+              </div>
+              <div class="prompt-viewer-actions">
+                <a class="button-link secondary" href="{{ url_for('serve_file', rel_path=selected_paper.rel_path) }}" target="_blank" rel="noreferrer">打开原文件</a>
+              </div>
+            </div>
+            <div class="source-viewer-body docx-preview wide">
+              <p>当前环境会索引 `.doc` 的标题和文件信息，但不能像 PDF / `.docx` 一样直接提取正文。</p>
+            </div>
+          </div>
+        {% else %}
+          <div class="viewer-empty source-viewer source-empty-viewer">
+            <div class="source-viewer-head">
+              <div>
+                <strong>源文件</strong>
+                <span>当前格式暂不支持内嵌预览</span>
+              </div>
+              <div class="prompt-viewer-actions">
+                <a class="button-link secondary" href="{{ url_for('serve_file', rel_path=selected_paper.rel_path) }}" target="_blank" rel="noreferrer">打开原文件</a>
+              </div>
+            </div>
+            <h3>当前格式暂不支持预览</h3>
+            <p>你仍然可以点击“打开原文件”查看原始文档。</p>
+          </div>
+        {% endif %}
+      {% elif selected_prompt %}
+        {% if selected_prompt_content %}
+          <div class="prompt-viewer">
+            <div class="prompt-viewer-head">
+              <div>
+                <strong>{{ selected_prompt.name }}</strong>
+                <span>
+                  {% if selected_prompt_info and selected_prompt_info.updated_at %}
+                    {{ selected_prompt_info.updated_at }}
+                  {% else %}
+                    已生成
+                  {% endif %}
+                </span>
+              </div>
+              <div class="prompt-viewer-actions">
+                <a class="button-link secondary" href="{{ url_for('serve_file', rel_path=selected_paper.rel_path) }}" target="_blank" rel="noreferrer">打开原文件</a>
+                {% if selected_prompt_info and selected_prompt_info.result_rel_path %}
+                  <a class="button-link secondary" href="{{ url_for('serve_file', rel_path=selected_prompt_info.result_rel_path) }}" target="_blank" rel="noreferrer">打开 MD</a>
+                {% endif %}
+                <form action="{{ url_for('prompt_run_route') }}" method="post" class="inline-form">
+                  <input type="hidden" name="folder" value="{{ current_folder }}">
+                  <input type="hidden" name="q" value="{{ query }}">
+                  <input type="hidden" name="sort" value="{{ sort_by }}">
+                  <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+                  <input type="hidden" name="rel_path" value="{{ selected_paper.rel_path }}">
+                  <input type="hidden" name="prompt_slug" value="{{ selected_prompt.slug }}">
+                  <input type="hidden" name="force" value="on">
+                  <button type="submit" class="secondary">重新运行</button>
+                </form>
+              </div>
+            </div>
+            <article class="markdown-viewer markdown-render">{{ selected_prompt_html }}</article>
+          </div>
+        {% else %}
+          <div class="viewer-empty prompt-empty-state">
+            <h3>{{ selected_prompt.name }}</h3>
+            <p>这个 Prompt 还没有应用到当前论文上，所以这里暂时是空的。</p>
+            {% if selected_prompt_job and selected_prompt_job.status in ['queued', 'running'] %}
+              <div class="inline-job-card" id="selected-prompt-job" data-job-id="{{ selected_prompt_job.id }}">
+                <div class="job-card-top">
+                  <strong>{{ selected_prompt_job.prompt_name }}</strong>
+                  <span>{{ selected_prompt_job.status }}</span>
+                </div>
+                <div class="job-progress"><span style="width: {{ selected_prompt_job.progress }}%"></span></div>
+                <p class="job-message">{{ selected_prompt_job.message }}</p>
+              </div>
+            {% endif %}
+            <form action="{{ url_for('prompt_run_route') }}" method="post" class="inline-form centered-form">
+              <input type="hidden" name="folder" value="{{ current_folder }}">
+              <input type="hidden" name="q" value="{{ query }}">
+              <input type="hidden" name="sort" value="{{ sort_by }}">
+              <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+              <input type="hidden" name="rel_path" value="{{ selected_paper.rel_path }}">
+              <input type="hidden" name="prompt_slug" value="{{ selected_prompt.slug }}">
+              <button type="submit">立即运行这个 Prompt</button>
+            </form>
+          </div>
+        {% endif %}
+      {% endif %}
+    {% else %}
+      <div class="viewer-empty">
+        <h3>还没有选中文件</h3>
+        <p>左边会显示论文列表，点击任意一篇即可在这里打开。</p>
+      </div>
+    {% endif %}
+  </section>
+</section>
+
+<section class="bottom-tools card">
+  <div class="tools-head">
+    <div>
+      <p class="eyebrow">Tools</p>
+      <h2>附加功能</h2>
+      <p class="sidebar-copy">检索、上传、文件管理、Prompt 管理和历史批处理都折叠在下方。</p>
+    </div>
+  </div>
+
+  <details class="tool-panel">
+    <summary>检索与排序</summary>
+    <form class="tool-grid" action="{{ url_for('index') }}" method="get">
+      <input type="hidden" name="paper" value="{{ selected_paper.rel_path if selected_paper else '' }}">
+      <input type="hidden" name="tab" value="{{ selected_tab }}">
+      <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+      <label>
+        <span>搜索标题 / 文件名</span>
+        <input type="search" name="q" value="{{ query }}" placeholder="例如：DeepSeek 或 2501.12948">
+      </label>
+      <label>
+        <span>浏览文件夹</span>
+        <select name="folder">
+          <option value="" {% if not current_folder %}selected{% endif %}>全部文件夹</option>
+          {% for folder in folders %}
+            {% if folder %}
+              <option value="{{ folder }}" {% if current_folder == folder %}selected{% endif %}>{{ folder }}</option>
+            {% endif %}
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>排序方式</span>
+        <select name="sort">
+          <option value="date_desc" {% if sort_by == 'date_desc' %}selected{% endif %}>按日期从新到旧</option>
+          <option value="date_asc" {% if sort_by == 'date_asc' %}selected{% endif %}>按日期从旧到新</option>
+          <option value="title" {% if sort_by == 'title' %}selected{% endif %}>按标题 / 文件名</option>
+        </select>
+      </label>
+      <div class="tool-actions">
+        <button type="submit">应用条件</button>
+      </div>
+    </form>
+  </details>
+
+  <details class="tool-panel">
+    <summary>上传与文件夹</summary>
+    <div class="stacked-tool-grid">
+      <form class="tool-grid upload-form-grid" id="upload-form" action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" data-upload-endpoint="{{ url_for('upload_file') }}">
+        <input type="hidden" name="folder" value="{{ current_folder }}">
+        <input type="hidden" name="q" value="{{ query }}">
+        <input type="hidden" name="sort" value="{{ sort_by }}">
+        <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+        <label>
+          <span>目标文件夹</span>
+          <input type="text" name="target_folder" value="{{ current_folder }}" placeholder="例如：rl/deepseek">
+        </label>
+        <label>
+          <span>选择文件</span>
+          <input type="file" name="files" id="upload-files" multiple accept=".pdf,.doc,.docx">
+        </label>
+        <div class="tool-hint">仅允许 {{ allowed_extensions }}。上传后会自动应用所有已启用且允许自动运行的 Prompt。</div>
+        <div class="tool-actions">
+          <button type="submit" id="upload-submit">上传论文</button>
+        </div>
+      </form>
+      <section class="upload-visualizer" id="upload-visualizer" hidden>
+        <div class="upload-visualizer-head">
+          <div>
+            <strong>上传进度</strong>
+            <span id="upload-summary-text">等待上传</span>
+          </div>
+          <span id="upload-overall-percent">0%</span>
+        </div>
+        <div class="job-progress upload-overall-progress"><span id="upload-overall-bar" style="width: 0%"></span></div>
+        <div class="upload-stat-strip">
+          <div class="job-summary-card">
+            <span>总文件数</span>
+            <strong id="upload-total-count">0</strong>
+          </div>
+          <div class="job-summary-card">
+            <span>已完成</span>
+            <strong id="upload-complete-count">0</strong>
+          </div>
+          <div class="job-summary-card">
+            <span>已跳过重复</span>
+            <strong id="upload-duplicate-count">0</strong>
+          </div>
+          <div class="job-summary-card">
+            <span>失败</span>
+            <strong id="upload-error-count">0</strong>
+          </div>
+        </div>
+        <div class="upload-file-list" id="upload-file-list"></div>
+      </section>
+
+      <form class="tool-grid" action="{{ url_for('create_folder_route') }}" method="post">
+        <input type="hidden" name="folder" value="{{ current_folder }}">
+        <input type="hidden" name="q" value="{{ query }}">
+        <input type="hidden" name="sort" value="{{ sort_by }}">
+        <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+        <input type="hidden" name="paper" value="{{ selected_paper.rel_path if selected_paper else '' }}">
+        <input type="hidden" name="tab" value="{{ selected_tab }}">
+        <label>
+          <span>父文件夹</span>
+          <input type="text" name="parent_folder" value="{{ current_folder }}" placeholder="留空表示根目录">
+        </label>
+        <label>
+          <span>新文件夹名</span>
+          <input type="text" name="new_folder" placeholder="例如：reading-list">
+        </label>
+        <div class="tool-hint">会在当前论文库目录里创建子文件夹。</div>
+        <div class="tool-actions">
+          <button type="submit">新建文件夹</button>
+        </div>
+      </form>
+    </div>
+  </details>
+
+  <details class="tool-panel">
+    <summary>文件管理</summary>
+    {% if selected_paper %}
+      <div class="stacked-tool-grid">
+        <form class="tool-grid" action="{{ url_for('rename_route') }}" method="post">
+          <input type="hidden" name="folder" value="{{ current_folder }}">
+          <input type="hidden" name="q" value="{{ query }}">
+          <input type="hidden" name="sort" value="{{ sort_by }}">
+          <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+          <input type="hidden" name="tab" value="{{ selected_tab }}">
+          <input type="hidden" name="rel_path" value="{{ selected_paper.rel_path }}">
+          <label>
+            <span>当前文件</span>
+            <input type="text" value="{{ selected_paper.rel_path }}" readonly>
+          </label>
+          <label>
+            <span>新文件名</span>
+            <input type="text" name="new_name" value="{{ selected_paper.file_name }}">
+          </label>
+          <div class="tool-hint">重命名后会同步移动该论文已生成的 Prompt 结果文件。</div>
+          <div class="tool-actions">
+            <button type="submit">重命名文件</button>
+          </div>
+        </form>
+
+        <form class="tool-grid danger-grid" action="{{ url_for('delete_route') }}" method="post">
+          <input type="hidden" name="folder" value="{{ current_folder }}">
+          <input type="hidden" name="q" value="{{ query }}">
+          <input type="hidden" name="sort" value="{{ sort_by }}">
+          <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+          <input type="hidden" name="rel_path" value="{{ selected_paper.rel_path }}">
+          <div class="library-box danger-box">
+            <span class="meta-label">删除目标</span>
+            <strong>{{ selected_paper.file_name }}</strong>
+          </div>
+          <div class="tool-hint">会删除原文件以及这篇论文关联的所有 Prompt 结果。</div>
+          <div class="tool-actions">
+            <button class="danger" type="submit" onclick="return confirm('确定要删除这篇论文吗？');">删除文件</button>
+          </div>
+        </form>
+
+        <form class="tool-grid compact-actions-grid" action="{{ url_for('reindex') }}" method="post">
+          <input type="hidden" name="folder" value="{{ current_folder }}">
+          <input type="hidden" name="q" value="{{ query }}">
+          <input type="hidden" name="sort" value="{{ sort_by }}">
+          <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+          <input type="hidden" name="paper" value="{{ selected_paper.rel_path }}">
+          <input type="hidden" name="tab" value="{{ selected_tab }}">
+          <div class="tool-hint">如果你在系统外手动增删改了文件，可以在这里重新扫描目录。</div>
+          <div class="tool-actions">
+            <button class="secondary" type="submit">重新扫描论文目录</button>
+          </div>
+        </form>
+      </div>
+    {% else %}
+      <p class="empty-inline">先在左边选中一篇论文，才能进行重命名或删除。</p>
+    {% endif %}
+  </details>
+
+  <details class="tool-panel">
+    <summary>后台任务</summary>
+    <div class="jobs-panel-head">
+      <div class="jobs-controls">
+        <div class="tool-hint">任务提交后会在服务端后台持续处理；刷新页面或重新打开浏览器后仍可看到最新进度。</div>
+        <div class="jobs-control-actions">
+          <form class="jobs-config-form" action="{{ url_for('jobs_config_route') }}" method="post">
+            <input type="hidden" name="folder" value="{{ current_folder }}">
+            <input type="hidden" name="q" value="{{ query }}">
+            <input type="hidden" name="sort" value="{{ sort_by }}">
+            <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+            <input type="hidden" name="paper" value="{{ selected_paper.rel_path if selected_paper else '' }}">
+            <input type="hidden" name="tab" value="{{ selected_tab }}">
+            <label class="jobs-inline-field">
+              <span>Max concurrency</span>
+              <input type="number" name="max_concurrency" min="1" max="32" value="{{ initial_job_snapshot.max_concurrency }}">
+            </label>
+            <button type="submit" class="secondary">保存</button>
+          </form>
+          <form action="{{ url_for('jobs_stop_all_route') }}" method="post">
+            <input type="hidden" name="folder" value="{{ current_folder }}">
+            <input type="hidden" name="q" value="{{ query }}">
+            <input type="hidden" name="sort" value="{{ sort_by }}">
+            <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+            <input type="hidden" name="paper" value="{{ selected_paper.rel_path if selected_paper else '' }}">
+            <input type="hidden" name="tab" value="{{ selected_tab }}">
+            <button class="danger" type="submit" onclick="return confirm('确定要中断所有后台任务吗？');">全部停止</button>
+          </form>
+        </div>
+      </div>
+      <div class="job-summary-strip">
+        <div class="job-summary-card">
+          <span>当前执行中</span>
+          <strong id="job-running-count">{{ initial_job_snapshot.running_count }}/{{ initial_job_snapshot.max_concurrency }}</strong>
+        </div>
+        <div class="job-summary-card">
+          <span>排队中任务</span>
+          <strong id="job-queued-count">{{ initial_job_snapshot.queued_count }}</strong>
+        </div>
+        <div class="job-summary-card">
+          <span>平均每任务耗时</span>
+          <strong id="job-average-duration">{% if initial_job_snapshot.average_duration_seconds is not none %}{{ '%.1f 秒'|format(initial_job_snapshot.average_duration_seconds) }}{% else %}暂无{% endif %}</strong>
+        </div>
+        <div class="job-summary-card">
+          <span>最大并发</span>
+          <strong id="job-max-concurrency">{{ initial_job_snapshot.max_concurrency }}</strong>
+        </div>
+      </div>
+    </div>
+    <div id="job-dashboard" class="job-dashboard" data-selected-paper="{{ selected_paper.rel_path if selected_paper else '' }}">
+      <div class="job-dashboard-empty">当前没有后台任务。</div>
+    </div>
+  </details>
+
+  <details class="tool-panel">
+    <summary>Prompt 管理</summary>
+    <div
+      class="lazy-panel-slot"
+      data-lazy-panel
+      data-panel-url="{{ url_for('tool_panel_route', panel_name='prompt-manager', folder=current_folder, q=query, sort=sort_by, paper=selected_paper.rel_path if selected_paper else None, tab=selected_tab, show_done='1' if show_done else None) }}"
+    >
+      <p class="lazy-panel-hint">展开时再加载 Prompt 管理器，减少首页首屏负担。</p>
+    </div>
+  </details>
+
+  <details class="tool-panel">
+    <summary>离线阅读包</summary>
+    <div
+      class="lazy-panel-slot"
+      data-lazy-panel
+      data-panel-url="{{ url_for('tool_panel_route', panel_name='offline-package', folder=current_folder, q=query, sort=sort_by, paper=selected_paper.rel_path if selected_paper else None, tab=selected_tab, show_done='1' if show_done else None) }}"
+    >
+      <p class="lazy-panel-hint">展开时再加载离线导出列表，避免首页一次性渲染大量复选框。</p>
+    </div>
+  </details>
+
+  <details class="tool-panel">
+    <summary>历史论文批量补跑</summary>
+    <div
+      class="lazy-panel-slot"
+      data-lazy-panel
+      data-panel-url="{{ url_for('tool_panel_route', panel_name='batch-run', folder=current_folder, q=query, sort=sort_by, paper=selected_paper.rel_path if selected_paper else None, tab=selected_tab, show_done='1' if show_done else None) }}"
+    >
+      <p class="lazy-panel-hint">展开时再加载批量补跑面板，减少首屏 HTML 体积。</p>
+    </div>
+  </details>
+</section>
+{% endblock %}
+{% block scripts %}
+  <script id="initial-job-snapshot" type="application/json">{{ initial_job_snapshot | tojson }}</script>
+  <script>
+    (() => {
+      const dashboard = document.getElementById("job-dashboard");
+      const uploadForm = document.getElementById("upload-form");
+      const uploadVisualizer = document.getElementById("upload-visualizer");
+      const uploadFileList = document.getElementById("upload-file-list");
+      const uploadSummaryText = document.getElementById("upload-summary-text");
+      const uploadOverallPercent = document.getElementById("upload-overall-percent");
+      const uploadOverallBar = document.getElementById("upload-overall-bar");
+      const uploadTotalCount = document.getElementById("upload-total-count");
+      const uploadCompleteCount = document.getElementById("upload-complete-count");
+      const uploadDuplicateCount = document.getElementById("upload-duplicate-count");
+      const uploadErrorCount = document.getElementById("upload-error-count");
+      const paperList = document.getElementById("paper-list");
+      const paperListEmpty = document.getElementById("paper-list-empty");
+      const paperCountNode = document.getElementById("paper-count");
+      const selectedPaper = dashboard ? (dashboard.dataset.selectedPaper || "") : "";
+      const selectedPromptCard = document.getElementById("selected-prompt-job");
+      const initialData = JSON.parse(document.getElementById("initial-job-snapshot").textContent || "{\"jobs\":[]}");
+      const runningCountNode = document.getElementById("job-running-count");
+      const queuedCountNode = document.getElementById("job-queued-count");
+      const averageDurationNode = document.getElementById("job-average-duration");
+      const maxConcurrencyNode = document.getElementById("job-max-concurrency");
+      const sortBy = "{{ sort_by }}";
+      const currentFolder = "{{ current_folder }}";
+      const currentQuery = "{{ query }}";
+
+      function escapeHtml(value) {
+        return String(value || "").replace(/[&<>"']/g, (char) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          "\"": "&quot;",
+          "'": "&#39;",
+        }[char]));
+      }
+
+      function statusLabel(status) {
+        return {
+          queued: "排队中",
+          running: "处理中",
+          saved: "已上传",
+          duplicate: "重复跳过",
+          error: "失败",
+          completed: "已完成",
+          failed: "失败",
+          skipped: "已跳过",
+          stopped: "已停止",
+        }[status] || status;
+      }
+
+      function ensurePaperList() {
+        if (document.getElementById("paper-list")) {
+          return document.getElementById("paper-list");
+        }
+        if (!paperListEmpty || !paperListEmpty.parentNode) {
+          return null;
+        }
+        const scroll = document.createElement("div");
+        scroll.className = "paper-tree-scroll";
+        scroll.id = "paper-tree-scroll";
+        const list = document.createElement("div");
+        list.className = "paper-compact-list paper-group-tree";
+        list.id = "paper-list";
+        list.dataset.sort = sortBy;
+        scroll.appendChild(list);
+        paperListEmpty.replaceWith(scroll);
+        return list;
+      }
+
+      function groupSortValue(key, fallbackHigh) {
+        if (!key || key === "unknown") return fallbackHigh;
+        return key;
+      }
+
+      function compareGroupKeys(left, right, direction = "desc") {
+        const leftValue = groupSortValue(left, direction === "desc" ? "0000" : "9999");
+        const rightValue = groupSortValue(right, direction === "desc" ? "0000" : "9999");
+        return direction === "desc"
+          ? rightValue.localeCompare(leftValue)
+          : leftValue.localeCompare(rightValue);
+      }
+
+      function updateGroupSummary(details, count) {
+        const countNode = details.querySelector(":scope > summary small");
+        if (countNode) countNode.textContent = String(count);
+      }
+
+      function ensureYearGroup(list, paper) {
+        const selector = `[data-year-key="${CSS.escape(paper.year_key || "unknown")}"]`;
+        let group = list.querySelector(`:scope > .paper-year-group${selector}`);
+        if (group) return group;
+
+        group = document.createElement("details");
+        group.className = "paper-year-group";
+        group.dataset.yearKey = paper.year_key || "unknown";
+        group.open = true;
+        group.innerHTML = `
+          <summary>
+            <span>${escapeHtml(paper.year_label || "未提取日期")}</span>
+            <small>0</small>
+          </summary>
+          <div class="paper-month-group-list"></div>
+        `;
+
+        const groups = Array.from(list.querySelectorAll(":scope > .paper-year-group"));
+        const insertBefore = groups.find((candidate) => (
+          compareGroupKeys(paper.year_key || "unknown", candidate.dataset.yearKey || "unknown", "desc") < 0
+        ));
+        if (insertBefore) {
+          insertBefore.before(group);
+        } else {
+          list.appendChild(group);
+        }
+        return group;
+      }
+
+      function ensureMonthGroup(yearGroup, paper) {
+        const monthList = yearGroup.querySelector(".paper-month-group-list");
+        const selector = `[data-month-key="${CSS.escape(paper.month_key || "unknown")}"]`;
+        let group = monthList.querySelector(`:scope > .paper-month-group${selector}`);
+        if (group) return group;
+
+        group = document.createElement("details");
+        group.className = "paper-month-group";
+        group.dataset.yearKey = paper.year_key || "unknown";
+        group.dataset.monthKey = paper.month_key || "unknown";
+        group.open = true;
+        group.innerHTML = `
+          <summary>
+            <span>${escapeHtml(paper.month_label || "未分类")}</span>
+            <small>0</small>
+          </summary>
+          <div class="paper-month-list"></div>
+        `;
+
+        const groups = Array.from(monthList.querySelectorAll(":scope > .paper-month-group"));
+        const insertBefore = groups.find((candidate) => (
+          compareGroupKeys(paper.month_key || "unknown", candidate.dataset.monthKey || "unknown", "desc") < 0
+        ));
+        if (insertBefore) {
+          insertBefore.before(group);
+        } else {
+          monthList.appendChild(group);
+        }
+        return group;
+      }
+
+      function comparePaperRows(newPaper, existingRow) {
+        const rowDate = existingRow.dataset.sortDate || "";
+        const rowTitle = existingRow.dataset.displayTitle || "";
+        const rowFile = existingRow.dataset.fileName || "";
+        const paperDate = newPaper.sort_date || "";
+        const paperTitle = (newPaper.display_title || "").toLowerCase();
+        const paperFile = (newPaper.file_name || "").toLowerCase();
+
+        if (sortBy === "title") {
+          if (paperTitle !== rowTitle) return paperTitle.localeCompare(rowTitle, "zh-CN");
+          return paperFile.localeCompare(rowFile, "zh-CN");
+        }
+        if (sortBy === "date_asc") {
+          const dateCmp = paperDate.localeCompare(rowDate);
+          if (dateCmp !== 0) return dateCmp;
+          return paperTitle.localeCompare(rowTitle, "zh-CN");
+        }
+        const dateCmp = rowDate.localeCompare(paperDate);
+        if (dateCmp !== 0) return dateCmp;
+        return rowTitle.localeCompare(paperTitle, "zh-CN");
+      }
+
+      function buildPaperRow(paper) {
+        const row = document.createElement("a");
+        row.className = `paper-row${selectedPaper && selectedPaper === paper.rel_path ? " active" : ""}`;
+        row.href = paper.paper_url;
+        row.dataset.relPath = paper.rel_path;
+        row.dataset.displayTitle = (paper.display_title || "").toLowerCase();
+        row.dataset.fileName = (paper.file_name || "").toLowerCase();
+        row.dataset.sortDate = paper.sort_date || "";
+        row.dataset.folder = paper.folder || "";
+        row.dataset.done = paper.is_done ? "1" : "0";
+        row.dataset.yearKey = paper.year_key || "unknown";
+        row.dataset.monthKey = paper.month_key || "unknown";
+        row.innerHTML = `
+          <div class="paper-row-top">
+            <span class="paper-row-type">${escapeHtml(paper.extension)}</span>
+            ${paper.extracted_date ? `<span class="paper-row-date">${escapeHtml(paper.extracted_date)}</span>` : ""}
+          </div>
+          <strong class="paper-row-title">${escapeHtml(paper.display_title)}</strong>
+          <span class="paper-row-file">${escapeHtml(paper.file_name)}</span>
+          <div class="paper-row-bottom">
+            <div class="paper-row-flags">
+              ${paper.folder ? `<span class="paper-row-folder">${escapeHtml(paper.folder)}</span>` : ""}
+              ${paper.is_done ? '<span class="paper-row-done">DONE</span>' : ""}
+            </div>
+            <span class="paper-row-summary">${paper.prompt_result_count}/${paper.active_prompt_count}</span>
+          </div>
+        `;
+        return row;
+      }
+
+      function insertPaperIntoList(paper) {
+        if (!paper || paper.visible_in_current_view === false) return;
+        const list = ensurePaperList();
+        if (!list) return;
+
+        const existing = list.querySelector(`[data-rel-path="${CSS.escape(paper.rel_path)}"]`);
+        const row = buildPaperRow(paper);
+        if (existing) {
+          existing.replaceWith(row);
+          return;
+        }
+
+        const yearGroup = ensureYearGroup(list, paper);
+        const monthGroup = ensureMonthGroup(yearGroup, paper);
+        const monthList = monthGroup.querySelector(".paper-month-list");
+        const rows = Array.from(monthList.querySelectorAll(":scope > .paper-row"));
+        const insertBefore = rows.find((candidate) => comparePaperRows(paper, candidate) < 0);
+        if (insertBefore) {
+          insertBefore.before(row);
+        } else {
+          monthList.appendChild(row);
+        }
+
+        const monthCount = monthList.querySelectorAll(":scope > .paper-row").length;
+        updateGroupSummary(monthGroup, monthCount);
+        const yearCount = yearGroup.querySelectorAll(".paper-month-list > .paper-row").length;
+        updateGroupSummary(yearGroup, yearCount);
+
+        if (paperCountNode) {
+          paperCountNode.textContent = String(Number(paperCountNode.textContent || "0") + 1);
+        }
+      }
+
+      function renderJobs(snapshot) {
+        if (!dashboard) return;
+        const jobs = snapshot.jobs || [];
+        if (runningCountNode) {
+          runningCountNode.textContent = `${snapshot.running_count || 0}/${snapshot.max_concurrency || 0}`;
+        }
+        if (queuedCountNode) {
+          queuedCountNode.textContent = String(snapshot.queued_count || 0);
+        }
+        if (averageDurationNode) {
+          averageDurationNode.textContent = snapshot.average_duration_seconds == null
+            ? "暂无"
+            : `${Number(snapshot.average_duration_seconds).toFixed(1)} 秒`;
+        }
+        if (maxConcurrencyNode && snapshot.max_concurrency != null) {
+          maxConcurrencyNode.textContent = String(snapshot.max_concurrency);
+        }
+        if (!jobs.length) {
+          dashboard.innerHTML = '<div class="job-dashboard-empty">当前没有后台任务。</div>';
+          return;
+        }
+
+        const active = jobs.filter((job) => job.status === "queued" || job.status === "running");
+        const recent = jobs.filter((job) => job.status !== "queued" && job.status !== "running").slice(0, 8);
+        const visible = [...active, ...recent];
+
+        dashboard.innerHTML = visible.map((job) => {
+          const isCurrentPaper = selectedPaper && job.rel_path === selectedPaper;
+          const errorLine = job.error ? `<p class="job-error">${job.error}</p>` : "";
+          const resultLine = job.result_rel_path ? `<p class="job-result">结果文件：${job.result_rel_path}</p>` : "";
+          return `
+            <article class="job-card ${job.status} ${isCurrentPaper ? "current-paper" : ""}" data-job-id="${job.id}">
+              <div class="job-card-top">
+                <div>
+                  <strong>${job.prompt_name}</strong>
+                  <span>${job.file_name}</span>
+                </div>
+                <span class="job-status">${statusLabel(job.status)}</span>
+              </div>
+              <div class="job-progress"><span style="width: ${job.progress}%"></span></div>
+              <div class="job-meta">
+                <span>${job.progress}%</span>
+                <span>${job.updated_at}</span>
+              </div>
+              <p class="job-message">${job.message || ""}</p>
+              ${resultLine}
+              ${errorLine}
+            </article>
+          `;
+        }).join("");
+
+        if (selectedPromptCard) {
+          const selectedId = selectedPromptCard.dataset.jobId;
+          const selectedJob = jobs.find((job) => job.id === selectedId);
+          if (selectedJob) {
+            selectedPromptCard.querySelector(".job-card-top span").textContent = statusLabel(selectedJob.status);
+            selectedPromptCard.querySelector(".job-progress span").style.width = `${selectedJob.progress}%`;
+            selectedPromptCard.querySelector(".job-message").textContent = selectedJob.message || "";
+          }
+        }
+      }
+
+      let jobRefreshTimer = null;
+
+      function scheduleJobRefresh(delay) {
+        if (!dashboard) return;
+        if (jobRefreshTimer) window.clearTimeout(jobRefreshTimer);
+        jobRefreshTimer = window.setTimeout(() => {
+          refreshJobs().catch((error) => {
+            console.error("Failed to refresh jobs", error);
+            scheduleJobRefresh(15000);
+          });
+        }, delay);
+      }
+
+      async function refreshJobs() {
+        if (!dashboard) return;
+        if (document.hidden) {
+          scheduleJobRefresh(30000);
+          return;
+        }
+        try {
+          const response = await fetch("{{ url_for('jobs_status') }}", { cache: "no-store" });
+          if (!response.ok) return;
+          const snapshot = await response.json();
+          renderJobs(snapshot);
+          scheduleJobRefresh((snapshot.active_count || 0) > 0 ? 4000 : 15000);
+        } catch (error) {
+          scheduleJobRefresh(15000);
+          throw error;
+        }
+      }
+
+      function renderUploadCard(item) {
+        return `
+          <article class="upload-file-card ${item.status}">
+            <div class="job-card-top">
+              <div>
+                <strong>${escapeHtml(item.name)}</strong>
+                <span>${escapeHtml(item.message || "等待上传")}</span>
+              </div>
+              <span class="job-status">${escapeHtml(statusLabel(item.status))}</span>
+            </div>
+            <div class="job-progress"><span style="width: ${item.progress}%"></span></div>
+            <div class="job-meta">
+              <span>${item.progress}%</span>
+              <span>${escapeHtml(item.sizeLabel)}</span>
+            </div>
+          </article>
+        `;
+      }
+
+      function updateUploadView(uploadItems) {
+        if (!uploadVisualizer || !uploadFileList) return;
+        const items = Array.from(uploadItems.values());
+        if (!items.length) {
+          uploadVisualizer.hidden = true;
+          return;
+        }
+
+        uploadVisualizer.hidden = false;
+        const completed = items.filter((item) => ["saved", "duplicate", "error"].includes(item.status)).length;
+        const duplicates = items.filter((item) => item.status === "duplicate").length;
+        const errors = items.filter((item) => item.status === "error").length;
+        const uploaded = items.reduce((sum, item) => sum + (item.loaded || 0), 0);
+        const total = items.reduce((sum, item) => sum + item.size, 0);
+        const percent = total ? Math.round((uploaded / total) * 100) : 0;
+
+        if (uploadSummaryText) {
+          uploadSummaryText.textContent = completed === items.length
+            ? "本轮上传已结束"
+            : `正在上传 ${completed}/${items.length} 个文件`;
+        }
+        if (uploadOverallPercent) uploadOverallPercent.textContent = `${percent}%`;
+        if (uploadOverallBar) uploadOverallBar.style.width = `${percent}%`;
+        if (uploadTotalCount) uploadTotalCount.textContent = String(items.length);
+        if (uploadCompleteCount) uploadCompleteCount.textContent = String(completed);
+        if (uploadDuplicateCount) uploadDuplicateCount.textContent = String(duplicates);
+        if (uploadErrorCount) uploadErrorCount.textContent = String(errors);
+        uploadFileList.innerHTML = items.map(renderUploadCard).join("");
+      }
+
+      function formatBytes(size) {
+        if (size < 1024) return `${size} B`;
+        if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+        if (size < 1024 * 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+        return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+      }
+
+      async function handleUploads(event) {
+        if (!uploadForm || !uploadVisualizer) return;
+        event.preventDefault();
+
+        const fileInput = uploadForm.querySelector("#upload-files");
+        const submitButton = document.getElementById("upload-submit");
+        const files = Array.from(fileInput.files || []);
+        if (!files.length) {
+          window.alert("请选择至少一个文件。");
+          return;
+        }
+
+        const uploadItems = new Map();
+        files.forEach((file, index) => {
+          uploadItems.set(index, {
+            id: index,
+            file,
+            name: file.name,
+            size: file.size,
+            sizeLabel: formatBytes(file.size),
+            progress: 0,
+            loaded: 0,
+            status: "queued",
+            message: "等待上传",
+          });
+        });
+        updateUploadView(uploadItems);
+
+        if (submitButton) submitButton.disabled = true;
+
+        const maxParallel = Math.min(4, files.length);
+        let cursor = 0;
+
+        async function uploadOne(item) {
+          item.status = "running";
+          item.message = "正在上传";
+          updateUploadView(uploadItems);
+
+          const formData = new FormData();
+          formData.append("file", item.file);
+          formData.append("target_folder", uploadForm.elements.target_folder.value || "");
+          formData.append("folder", uploadForm.elements.folder.value || "");
+          formData.append("q", uploadForm.elements.q.value || "");
+          formData.append("sort", uploadForm.elements.sort.value || "date_desc");
+          formData.append("show_done", uploadForm.elements.show_done.value || "");
+
+          const response = await new Promise((resolve, reject) => {
+            const request = new XMLHttpRequest();
+            request.open("POST", uploadForm.dataset.uploadEndpoint);
+            request.responseType = "json";
+
+            request.upload.addEventListener("progress", (progressEvent) => {
+              if (!progressEvent.lengthComputable) return;
+              item.loaded = progressEvent.loaded;
+              item.progress = Math.min(99, Math.round((progressEvent.loaded / progressEvent.total) * 100));
+              updateUploadView(uploadItems);
+            });
+
+            request.addEventListener("load", () => {
+              let payload = request.response;
+              if (!payload) {
+                try {
+                  payload = JSON.parse(request.responseText || "{}");
+                } catch (error) {
+                  payload = {};
+                }
+              }
+              if (request.status >= 200 && request.status < 300) {
+                resolve(payload);
+                return;
+              }
+              reject(new Error(payload.message || "上传失败"));
+            });
+            request.addEventListener("error", () => reject(new Error("网络错误，上传失败")));
+            request.send(formData);
+          });
+
+          item.loaded = item.size;
+          item.progress = 100;
+          item.status = response.status;
+          item.message = response.message || "已处理";
+          if (response.status === "saved" && response.paper && response.visible_in_current_view) {
+            insertPaperIntoList(response.paper);
+          }
+          if (response.status === "saved" || response.status === "duplicate") {
+            refreshJobs().catch((error) => console.error("Failed to refresh jobs", error));
+          }
+          updateUploadView(uploadItems);
+        }
+
+        async function worker() {
+          while (cursor < files.length) {
+            const current = cursor;
+            cursor += 1;
+            const item = uploadItems.get(current);
+            if (!item) continue;
+            try {
+              await uploadOne(item);
+            } catch (error) {
+              item.loaded = item.size;
+              item.progress = 100;
+              item.status = "error";
+              item.message = error.message || "上传失败";
+              updateUploadView(uploadItems);
+            }
+          }
+        }
+
+        await Promise.all(Array.from({ length: maxParallel }, worker));
+        if (submitButton) submitButton.disabled = false;
+      }
+
+      if (dashboard) {
+        renderJobs(initialData);
+        scheduleJobRefresh((initialData.active_count || 0) > 0 ? 2500 : 12000);
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) {
+            refreshJobs().catch((error) => console.error("Failed to refresh jobs", error));
+          }
+        });
+      }
+
+      if (uploadForm) {
+        uploadForm.addEventListener("submit", (event) => {
+          handleUploads(event).catch((error) => {
+            console.error("Upload queue failed", error);
+          });
+        });
+      }
+
+      async function loadLazyPanel(details) {
+        if (!details || details.dataset.panelLoaded === "1" || details.dataset.panelLoading === "1") return;
+        const slot = details.querySelector("[data-lazy-panel]");
+        const panelUrl = slot ? slot.dataset.panelUrl : "";
+        if (!slot || !panelUrl) return;
+
+        details.dataset.panelLoading = "1";
+        slot.innerHTML = '<p class="lazy-panel-loading">正在加载…</p>';
+        try {
+          const response = await fetch(panelUrl, { cache: "no-store" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          slot.innerHTML = await response.text();
+          details.dataset.panelLoaded = "1";
+        } catch (error) {
+          console.error("Failed to load tool panel", error);
+          slot.innerHTML = '<p class="lazy-panel-error">加载失败，请稍后重试。</p>';
+        } finally {
+          details.dataset.panelLoading = "0";
+        }
+      }
+
+      document.querySelectorAll(".tool-panel").forEach((details) => {
+        details.addEventListener("toggle", () => {
+          if (details.open) {
+            loadLazyPanel(details).catch((error) => {
+              console.error("Panel toggle load failed", error);
+            });
+          }
+        });
+      });
+
+      document.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-check-action]");
+        if (!button) return;
+        const action = button.dataset.checkAction;
+        const group = button.dataset.checkGroup;
+        document.querySelectorAll(`[data-batch-checkbox="${group}"]`).forEach((checkbox) => {
+          checkbox.checked = action === "all";
+        });
+      });
+    })();
+  </script>
+{% endblock %}

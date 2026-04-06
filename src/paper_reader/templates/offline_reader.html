@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>论文离线阅读包</title>
+    <link rel="stylesheet" href="assets/style.css">
+    <link rel="stylesheet" href="assets/offline-reader.css">
+  </head>
+  <body class="offline-body">
+    <div class="page-shell offline-page-shell">
+      <main>
+        <section class="workspace-shell offline-workspace">
+          <aside class="sidebar-pane card offline-sidebar">
+            <div class="sidebar-head">
+              <p class="eyebrow">Library</p>
+              <h2>离线论文列表</h2>
+              <p class="sidebar-copy">左侧紧凑检索，右侧尽量把空间留给阅读器。</p>
+              <label class="offline-search">
+                <span>检索标题 / 文件名</span>
+                <input id="offline-search-input" type="search" placeholder="输入标题、文件名或日期">
+              </label>
+              <div class="offline-stats">
+                <div class="job-summary-card">
+                  <span>论文</span>
+                  <strong id="offline-paper-count">0</strong>
+                </div>
+                <div class="job-summary-card">
+                  <span>Prompt</span>
+                  <strong id="offline-prompt-count">0</strong>
+                </div>
+              </div>
+            </div>
+            <div class="paper-tree-scroll" id="offline-paper-tree"></div>
+          </aside>
+
+          <section class="viewer-pane card offline-viewer">
+            <div id="offline-viewer-root" class="viewer-empty">
+              <h3>正在准备离线阅读器</h3>
+              <p>如果这里长时间没有内容，请直接打开 `assets/` 里的原文件确认浏览器权限。</p>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script id="offline-manifest" type="application/json">{{ manifest_json|safe }}</script>
+    <script src="assets/offline-reader.js"></script>
+  </body>
+</html>

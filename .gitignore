@@ -12,6 +12,7 @@ Thumbs.db
 
 # Logs
 *.log
+logs/
 
 # Python
 __pycache__/
@@ -24,3 +25,11 @@ venv/
 node_modules/
 dist/
 coverage/
+
+# Paper reader
+.tmp_pydeps/
+.paper_reader_index.json
+docs/papers/
+*.explained.zh.md
+.paper-reader-*.json
+.paper-reader-ai/

@@ -1,0 +1,31 @@
+{% extends 'base.html' %}
+{% block title %}登录{% endblock %}
+{% block content %}
+<section class="auth-shell">
+  <div class="auth-card card">
+    <div class="auth-copy">
+      <p class="eyebrow">Secure Access</p>
+      <h2>登录论文阅读器</h2>
+      <p class="hero-copy">输入用户名和密码后才能进入文档阅读器。密码连续输错 3 次会锁定 5 分钟。</p>
+    </div>
+
+    <form class="auth-form" action="{{ url_for('login') }}" method="post">
+      <input type="hidden" name="next" value="{{ next_url }}">
+      <label>
+        <span>用户名</span>
+        <input type="text" name="username" autocomplete="username" {% if locked %}disabled{% endif %} autofocus>
+      </label>
+      <label>
+        <span>密码</span>
+        <input type="password" name="password" autocomplete="current-password" {% if locked %}disabled{% endif %}>
+      </label>
+      {% if locked %}
+        <p class="auth-lock-note">当前已锁定，请在 {{ remaining_seconds }} 秒后重试。</p>
+      {% endif %}
+      <div class="tool-actions">
+        <button type="submit" {% if locked %}disabled{% endif %}>登录</button>
+      </div>
+    </form>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,58 @@
+<div class="lazy-panel-body">
+  {% if filtered_papers %}
+    <form class="batch-form" action="{{ url_for('offline_package_route') }}" method="post">
+      <input type="hidden" name="folder" value="{{ current_folder }}">
+      <input type="hidden" name="q" value="{{ query }}">
+      <input type="hidden" name="sort" value="{{ sort_by }}">
+      <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+      <input type="hidden" name="paper" value="{{ selected_paper.rel_path if selected_paper else '' }}">
+      <input type="hidden" name="tab" value="{{ selected_tab }}">
+
+      <div class="batch-grid">
+        <section class="batch-column">
+          <div class="batch-head">
+            <div>
+              <strong>导出范围</strong>
+              <span>只会导出当前筛选条件下未标记 DONE 的论文</span>
+            </div>
+          </div>
+          <div class="library-box">
+            <span class="meta-label">打包内容</span>
+            <strong>PDF / Word 原文件 + 已生成的 Markdown + 一个可离线浏览的 HTML 阅读器</strong>
+          </div>
+        </section>
+
+        <section class="batch-column">
+          <div class="batch-head">
+            <div>
+              <strong>选择论文</strong>
+              <span>下载后可直接离线阅读原文和各 Prompt 分析结果</span>
+            </div>
+            <div class="batch-head-actions">
+              <button type="button" class="ghost mini-action" data-check-action="all" data-check-group="offline-paper">全选</button>
+              <button type="button" class="ghost mini-action" data-check-action="none" data-check-group="offline-paper">清空</button>
+            </div>
+          </div>
+          <div class="checklist-box tall">
+            {% for paper in filtered_papers %}
+              <label class="check-card">
+                <input type="checkbox" name="rel_paths" value="{{ paper.rel_path }}" data-batch-checkbox="offline-paper" {% if selected_paper and paper.rel_path == selected_paper.rel_path %}checked{% endif %}>
+                <div>
+                  <strong>{{ paper.display_title }}</strong>
+                  <span>{{ paper.file_name }}{% if paper.extracted_date %} · {{ paper.extracted_date }}{% endif %} · {{ paper.prompt_result_count }}/{{ active_prompt_count }} Prompt</span>
+                </div>
+              </label>
+            {% endfor %}
+          </div>
+        </section>
+      </div>
+
+      <div class="tool-hint">下载的是一个完整 zip 包；解压后直接打开其中的 `index.html`，就能在本地继续浏览这些论文和对应的 MD 分析。</div>
+      <div class="tool-actions">
+        <button type="submit">下载离线阅读包 (.zip)</button>
+      </div>
+    </form>
+  {% else %}
+    <p class="empty-inline">当前没有符合筛选条件的未完成论文，无法生成离线阅读包。</p>
+  {% endif %}
+</div>

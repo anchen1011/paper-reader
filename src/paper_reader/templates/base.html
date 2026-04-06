@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Paper Reader{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Paper Reader</p>
+          <h1><a href="{{ url_for('index') }}">论文阅读器</a></h1>
+          <p class="hero-copy">上传、检索、按日期整理，并直接在浏览器里阅读 PDF / Word 论文。</p>
+        </div>
+      </header>
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          <section class="flash-stack">
+            {% for category, message in messages %}
+              <div class="flash flash-{{ category }}">{{ message }}</div>
+            {% endfor %}
+          </section>
+        {% endif %}
+      {% endwith %}
+
+      <main>
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+    {% block scripts %}{% endblock %}
+  </body>
+</html>

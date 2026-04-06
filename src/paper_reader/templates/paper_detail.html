@@ -1,0 +1,82 @@
+{% extends 'base.html' %}
+{% block title %}{{ paper.display_title }}{% endblock %}
+{% block content %}
+<section class="paper-detail-grid">
+  <article class="card detail-card">
+    <p class="eyebrow">Paper</p>
+    <h2>{{ paper.display_title }}</h2>
+    <p class="paper-file large">{{ paper.file_name }}</p>
+    <div class="detail-meta-grid">
+      <div>
+        <span class="meta-label">格式</span>
+        <strong>{{ paper.extension }}</strong>
+      </div>
+      <div>
+        <span class="meta-label">文件夹</span>
+        <strong>{{ paper.folder or '根目录' }}</strong>
+      </div>
+      <div>
+        <span class="meta-label">大小</span>
+        <strong>{{ format_bytes(paper.file_size) }}</strong>
+      </div>
+      <div>
+        <span class="meta-label">日期</span>
+        <strong>{{ paper.extracted_date or '未提取' }}</strong>
+      </div>
+      <div>
+        <span class="meta-label">日期来源</span>
+        <strong>{{ paper.date_source or '未知' }}</strong>
+      </div>
+      <div>
+        <span class="meta-label">修改时间</span>
+        <strong>{{ paper.modified_at }}</strong>
+      </div>
+    </div>
+    <div class="detail-actions">
+      <a class="button-link" href="{{ url_for('serve_file', rel_path=paper.rel_path) }}" target="_blank" rel="noreferrer">打开原文件</a>
+      <a class="button-link secondary" href="{{ url_for('index', folder=paper.folder) }}">返回列表</a>
+    </div>
+  </article>
+
+  <section class="card preview-card">
+    {% if paper.preview_kind == 'pdf' %}
+      <div class="preview-header">
+        <h3>PDF 预览</h3>
+        <p>点击也可在新标签直接查看原始 PDF。</p>
+      </div>
+      <iframe class="pdf-frame" src="{{ url_for('serve_file', rel_path=paper.rel_path) }}"></iframe>
+    {% elif paper.preview_kind == 'docx' %}
+      <div class="preview-header">
+        <h3>Word 预览</h3>
+        <p>以下为从 `.docx` 提取的正文片段。</p>
+      </div>
+      <div class="docx-preview">
+        {% for paragraph in preview_paragraphs %}
+          <p>{{ paragraph }}</p>
+        {% else %}
+          <p>没有提取到可预览的内容。</p>
+        {% endfor %}
+      </div>
+    {% elif paper.preview_kind == 'doc' %}
+      <div class="preview-header">
+        <h3>DOC 文件</h3>
+        <p>浏览器通常不直接渲染旧版 `.doc`。你仍然可以打开原文件，系统也会保留标题、文件名和日期索引。</p>
+      </div>
+      <div class="docx-preview">
+        {% if preview_paragraphs %}
+          {% for paragraph in preview_paragraphs %}
+            <p>{{ paragraph }}</p>
+          {% endfor %}
+        {% else %}
+          <p>当前没有可直接渲染的 `.doc` 正文预览。</p>
+        {% endif %}
+      </div>
+    {% else %}
+      <div class="preview-header">
+        <h3>文件预览</h3>
+      </div>
+      <p>当前格式暂不支持内嵌预览。</p>
+    {% endif %}
+  </section>
+</section>
+{% endblock %}

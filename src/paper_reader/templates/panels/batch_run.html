@@ -1,0 +1,70 @@
+<div class="lazy-panel-body">
+  {% if filtered_papers %}
+    <form class="batch-form" action="{{ url_for('prompt_batch_run_route') }}" method="post">
+      <input type="hidden" name="folder" value="{{ current_folder }}">
+      <input type="hidden" name="q" value="{{ query }}">
+      <input type="hidden" name="sort" value="{{ sort_by }}">
+      <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+      <input type="hidden" name="paper" value="{{ selected_paper.rel_path if selected_paper else '' }}">
+      <input type="hidden" name="tab" value="{{ selected_tab }}">
+
+      <div class="batch-grid">
+        <section class="batch-column">
+          <div class="batch-head">
+            <div>
+              <strong>选择 Prompt</strong>
+              <span>默认会跳过已跑过的组合</span>
+            </div>
+            <div class="batch-head-actions">
+              <button type="button" class="ghost mini-action" data-check-action="all" data-check-group="prompt">全选</button>
+              <button type="button" class="ghost mini-action" data-check-action="none" data-check-group="prompt">清空</button>
+            </div>
+          </div>
+          <div class="checklist-box">
+            {% for prompt in all_prompts %}
+              <label class="check-card">
+                <input type="checkbox" name="prompt_slugs" value="{{ prompt.slug }}" data-batch-checkbox="prompt" {% if prompt.enabled %}checked{% endif %}>
+                <div>
+                  <strong>{{ prompt.name }}</strong>
+                  <span>{{ prompt.slug }} · {{ prompt.model }}</span>
+                </div>
+              </label>
+            {% endfor %}
+          </div>
+        </section>
+
+        <section class="batch-column">
+          <div class="batch-head">
+            <div>
+              <strong>选择论文</strong>
+              <span>当前按照上方筛选条件展示</span>
+            </div>
+            <div class="batch-head-actions">
+              <button type="button" class="ghost mini-action" data-check-action="all" data-check-group="paper">全选</button>
+              <button type="button" class="ghost mini-action" data-check-action="none" data-check-group="paper">清空</button>
+            </div>
+          </div>
+          <div class="checklist-box tall">
+            {% for paper in filtered_papers %}
+              <label class="check-card">
+                <input type="checkbox" name="rel_paths" value="{{ paper.rel_path }}" data-batch-checkbox="paper" {% if selected_paper and paper.rel_path == selected_paper.rel_path %}checked{% endif %}>
+                <div>
+                  <strong>{{ paper.display_title }}</strong>
+                  <span>{{ paper.file_name }}{% if paper.extracted_date %} · {{ paper.extracted_date }}{% endif %}</span>
+                </div>
+              </label>
+            {% endfor %}
+          </div>
+        </section>
+      </div>
+
+      <label class="checkbox-line batch-force-line"><input type="checkbox" name="force"> 强制重跑已生成过的 Prompt 结果</label>
+      <div class="tool-hint">不勾选“强制重跑”时，系统只会对尚未执行过的文件 / Prompt 组合发起模型请求，避免重复成本。</div>
+      <div class="tool-actions">
+        <button type="submit">批量运行所选 Prompt</button>
+      </div>
+    </form>
+  {% else %}
+    <p class="empty-inline">当前没有符合筛选条件的论文，无法批量处理。</p>
+  {% endif %}
+</div>

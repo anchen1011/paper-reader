@@ -1,0 +1,106 @@
+<div class="lazy-panel-body">
+  <div class="prompt-manager-grid">
+    {% for prompt in all_prompts %}
+      <details class="prompt-card prompt-editor" {% if loop.first %}open{% endif %}>
+        <summary class="prompt-card-head">
+          <div>
+            <strong>{{ prompt.name }}</strong>
+            <span>{{ prompt.slug }}</span>
+          </div>
+          <div class="prompt-card-meta">
+            {% if prompt.enabled %}<span>已启用</span>{% else %}<span>已停用</span>{% endif %}
+            {% if prompt.auto_run %}<span>自动应用</span>{% endif %}
+          </div>
+        </summary>
+        <form class="prompt-form" action="{{ url_for('prompt_save_route') }}" method="post">
+          <input type="hidden" name="folder" value="{{ current_folder }}">
+          <input type="hidden" name="q" value="{{ query }}">
+          <input type="hidden" name="sort" value="{{ sort_by }}">
+          <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+          <input type="hidden" name="paper" value="{{ selected_paper.rel_path if selected_paper else '' }}">
+          <input type="hidden" name="tab" value="{{ selected_tab }}">
+          <input type="hidden" name="existing_slug" value="{{ prompt.slug }}">
+          <label>
+            <span>Tab 名称</span>
+            <input type="text" name="name" value="{{ prompt.name }}">
+          </label>
+          <label>
+            <span>内部标识</span>
+            <input type="text" name="slug" value="{{ prompt.slug }}" readonly>
+          </label>
+          <label>
+            <span>模型</span>
+            <input type="text" name="model" value="{{ prompt.model }}">
+          </label>
+          <div class="checkbox-pair">
+            <label class="checkbox-line"><input type="checkbox" name="enabled" {% if prompt.enabled %}checked{% endif %}> 启用这个 Prompt</label>
+            <label class="checkbox-line"><input type="checkbox" name="auto_run" {% if prompt.auto_run %}checked{% endif %}> 新论文自动应用</label>
+          </div>
+          <label>
+            <span>Prompt</span>
+            <textarea name="user_prompt" rows="10">{{ prompt.user_prompt }}</textarea>
+          </label>
+          <div class="tool-actions split-actions">
+            <button type="submit">保存 Prompt</button>
+          </div>
+        </form>
+        <form action="{{ url_for('prompt_delete_route') }}" method="post" class="inline-danger-form">
+          <input type="hidden" name="folder" value="{{ current_folder }}">
+          <input type="hidden" name="q" value="{{ query }}">
+          <input type="hidden" name="sort" value="{{ sort_by }}">
+          <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+          <input type="hidden" name="paper" value="{{ selected_paper.rel_path if selected_paper else '' }}">
+          <input type="hidden" name="tab" value="{{ selected_tab }}">
+          <input type="hidden" name="prompt_slug" value="{{ prompt.slug }}">
+          <button class="danger" type="submit" onclick="return confirm('确定要删除这个 Prompt 吗？已生成的 Markdown 结果文件不会自动删除。');">删除 Prompt</button>
+        </form>
+      </details>
+    {% else %}
+      <div class="library-box">
+        <span class="meta-label">Prompt 状态</span>
+        <strong>当前还没有 Prompt。</strong>
+      </div>
+    {% endfor %}
+
+    <section class="prompt-card new-prompt-card">
+      <div class="prompt-card-head">
+        <div>
+          <strong>新建 Prompt</strong>
+          <span>新建后会出现在论文阅读 tab 中</span>
+        </div>
+      </div>
+      <form class="prompt-form" action="{{ url_for('prompt_save_route') }}" method="post">
+        <input type="hidden" name="folder" value="{{ current_folder }}">
+        <input type="hidden" name="q" value="{{ query }}">
+        <input type="hidden" name="sort" value="{{ sort_by }}">
+        <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+        <input type="hidden" name="paper" value="{{ selected_paper.rel_path if selected_paper else '' }}">
+        <input type="hidden" name="tab" value="{{ selected_tab }}">
+        <label>
+          <span>Tab 名称</span>
+          <input type="text" name="name" value="{{ new_prompt_defaults.name }}" placeholder="例如：方法拆解 / 实验摘要 / 复现建议">
+        </label>
+        <label>
+          <span>内部标识</span>
+          <input type="text" name="slug" value="{{ new_prompt_defaults.slug }}" placeholder="可留空；系统会自动生成，例如：method-breakdown">
+        </label>
+        <label>
+          <span>模型</span>
+          <input type="text" name="model" value="{{ new_prompt_defaults.model }}">
+        </label>
+        <div class="checkbox-pair">
+          <label class="checkbox-line"><input type="checkbox" name="enabled" {% if new_prompt_defaults.enabled %}checked{% endif %}> 启用这个 Prompt</label>
+          <label class="checkbox-line"><input type="checkbox" name="auto_run" {% if new_prompt_defaults.auto_run %}checked{% endif %}> 新论文自动应用</label>
+        </div>
+        <div class="tool-hint">如果你只填中文的 Tab 名称，也可以直接创建；系统会自动分配可用的内部标识。可用变量：`{document_path}`、`{document_name}`、`{document_dir}`。</div>
+        <label>
+          <span>Prompt</span>
+          <textarea name="user_prompt" rows="10">{{ new_prompt_defaults.user_prompt }}</textarea>
+        </label>
+        <div class="tool-actions">
+          <button type="submit">创建 Prompt</button>
+        </div>
+      </form>
+    </section>
+  </div>
+</div>
