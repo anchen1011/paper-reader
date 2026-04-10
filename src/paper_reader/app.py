@@ -1478,6 +1478,55 @@ def create_app(library_root: Path | None = None) -> Flask:
             temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             temp_path.replace(path)
 
+        def _coerce_job(self, payload: dict[str, Any]) -> BibImportJobRecord | None:
+            try:
+                imported_rel_paths = payload.get("imported_rel_paths") or []
+                duplicate_rel_paths = payload.get("duplicate_rel_paths") or []
+                auto_prompt_summary = payload.get("auto_prompt_summary") or {}
+                return BibImportJobRecord(
+                    id=str(payload.get("id") or ""),
+                    source_name=str(payload.get("source_name") or ""),
+                    target_folder=str(payload.get("target_folder") or ""),
+                    status=str(payload.get("status") or "failed"),
+                    progress=int(payload.get("progress") or 0),
+                    message=str(payload.get("message") or ""),
+                    error=(str(payload.get("error")) if payload.get("error") is not None else None),
+                    total_entries=int(payload.get("total_entries") or 0),
+                    processed_entries=int(payload.get("processed_entries") or 0),
+                    imported_count=int(payload.get("imported_count") or 0),
+                    duplicate_count=int(payload.get("duplicate_count") or 0),
+                    unmatched_count=int(payload.get("unmatched_count") or 0),
+                    current_label=str(payload.get("current_label") or ""),
+                    source_bib_rel_path=(str(payload.get("source_bib_rel_path")) if payload.get("source_bib_rel_path") else None),
+                    unmatched_bib_rel_path=(str(payload.get("unmatched_bib_rel_path")) if payload.get("unmatched_bib_rel_path") else None),
+                    unmatched_list_rel_path=(str(payload.get("unmatched_list_rel_path")) if payload.get("unmatched_list_rel_path") else None),
+                    imported_rel_paths=[str(item) for item in imported_rel_paths if item],
+                    duplicate_rel_paths=[str(item) for item in duplicate_rel_paths if item],
+                    auto_prompt_summary=auto_prompt_summary if isinstance(auto_prompt_summary, dict) else {},
+                    created_at=str(payload.get("created_at") or ""),
+                    updated_at=str(payload.get("updated_at") or payload.get("created_at") or ""),
+                    started_at=(str(payload.get("started_at")) if payload.get("started_at") else None),
+                    finished_at=(str(payload.get("finished_at")) if payload.get("finished_at") else None),
+                )
+            except Exception:
+                return None
+
+        def _load_job_from_disk(self, job_id: str) -> BibImportJobRecord | None:
+            path = self._status_path(job_id)
+            if not path.exists():
+                return None
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(payload, dict):
+                return None
+            job = self._coerce_job(payload)
+            if job is None or not job.id:
+                return None
+            self._jobs[job.id] = job
+            return job
+
         def _update_job(self, job_id: str, **changes: Any) -> BibImportJobRecord | None:
             with self._lock:
                 job = self._jobs.get(job_id)
@@ -1546,7 +1595,29 @@ def create_app(library_root: Path | None = None) -> Flask:
 
         def get_job(self, job_id: str) -> BibImportJobRecord | None:
             with self._lock:
-                return self._jobs.get(job_id)
+                job = self._jobs.get(job_id)
+                if job is not None:
+                    return job
+                return self._load_job_from_disk(job_id)
+
+        def latest_job(self) -> BibImportJobRecord | None:
+            with self._lock:
+                if self._jobs:
+                    return max(self._jobs.values(), key=lambda item: (item.updated_at, item.created_at))
+                paths = sorted(self.job_root.glob("*/status.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+                for path in paths:
+                    try:
+                        payload = json.loads(path.read_text(encoding="utf-8"))
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    job = self._coerce_job(payload)
+                    if job is None or not job.id:
+                        continue
+                    self._jobs[job.id] = job
+                    return job
+            return None
 
         def _run_job(self, job_id: str, source_path: Path) -> None:
             self._update_job(job_id, status="running", progress=1, started_at=self._timestamp(), message="正在解析 Bib 文件。")
@@ -1850,6 +1921,7 @@ def create_app(library_root: Path | None = None) -> Flask:
         else:
             selected_tab = "source"
 
+        latest_bib_import_job = app.bib_import_manager.latest_job()  # type: ignore[attr-defined]
         return render_template(
             "index.html",
             papers=papers,
@@ -1872,6 +1944,7 @@ def create_app(library_root: Path | None = None) -> Flask:
             active_prompt_count=len(active_prompts),
             library_root=app.config["LIBRARY_ROOT"],
             initial_job_snapshot=app.job_queue.snapshot(),  # type: ignore[attr-defined]
+            initial_bib_import_snapshot=(serialize_bib_import_job(latest_bib_import_job) if latest_bib_import_job else None),
         )
 
     @app.get("/tool-panels/<panel_name>")

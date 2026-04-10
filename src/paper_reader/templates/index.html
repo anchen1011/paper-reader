@@ -589,6 +589,7 @@
 {% endblock %}
 {% block scripts %}
   <script id="initial-job-snapshot" type="application/json">{{ initial_job_snapshot | tojson }}</script>
+  <script id="initial-bib-import-snapshot" type="application/json">{{ initial_bib_import_snapshot | tojson }}</script>
   <script>
     (() => {
       const dashboard = document.getElementById("job-dashboard");
@@ -620,6 +621,7 @@
       const selectedPaper = dashboard ? (dashboard.dataset.selectedPaper || "") : "";
       const selectedPromptCard = document.getElementById("selected-prompt-job");
       const initialData = JSON.parse(document.getElementById("initial-job-snapshot").textContent || "{\"jobs\":[]}");
+      const initialBibImportData = JSON.parse(document.getElementById("initial-bib-import-snapshot").textContent || "null");
       const runningCountNode = document.getElementById("job-running-count");
       const queuedCountNode = document.getElementById("job-queued-count");
       const averageDurationNode = document.getElementById("job-average-duration");
@@ -1204,6 +1206,13 @@
             console.error("Bib import failed", error);
           });
         });
+      }
+
+      if (initialBibImportData) {
+        renderBibImport(initialBibImportData);
+        if (initialBibImportData.id && (initialBibImportData.status === "queued" || initialBibImportData.status === "running")) {
+          scheduleBibImportRefresh(initialBibImportData.id, 300);
+        }
       }
 
       async function loadLazyPanelContent(slot, panelUrl) {

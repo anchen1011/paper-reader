@@ -564,6 +564,51 @@ class PaperReaderAppTests(unittest.TestCase):
         self.assertEqual(second.status_code, 409)
         self.assertIn("当前已有一个 Bib 导入任务在运行", second.get_json()["message"])
 
+    def test_index_restores_latest_bib_import_snapshot_after_refresh(self) -> None:
+        bib_payload = b"@misc{direct, title={Direct Arxiv Entry}, url={https://arxiv.org/abs/2501.12948}}"
+        pdf_direct = self.make_pdf_bytes("Direct Arxiv Entry")
+
+        with patch("src.paper_reader.app.bib_import_utils.find_arxiv_id_for_bib_entry", return_value=("2501.12948", "direct")):
+            with patch("src.paper_reader.app.download_arxiv_pdf", return_value=pdf_direct):
+                with patch.object(self.app.job_queue, "submit", return_value={"queued": 1, "existing": 0, "skipped": 0, "invalid": 0, "job_ids": [], "jobs": []}):
+                    response = self.client.post(
+                        "/bib-import/start",
+                        data={"target_folder": "bib-refresh", "bib_file": (io.BytesIO(bib_payload), "library.bib")},
+                        content_type="multipart/form-data",
+                    )
+                    payload = response.get_json()
+                    self.assertIsNotNone(payload)
+                    job = self.wait_for_bib_import_job(payload["id"])
+
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn("initial-bib-import-snapshot", html)
+        self.assertIn(job["id"], html)
+        self.assertIn("completed", html)
+
+    def test_bib_import_status_route_can_reload_job_from_disk(self) -> None:
+        bib_payload = b"@misc{direct, title={Direct Arxiv Entry}, url={https://arxiv.org/abs/2501.12948}}"
+        pdf_direct = self.make_pdf_bytes("Direct Arxiv Entry")
+
+        with patch("src.paper_reader.app.bib_import_utils.find_arxiv_id_for_bib_entry", return_value=("2501.12948", "direct")):
+            with patch("src.paper_reader.app.download_arxiv_pdf", return_value=pdf_direct):
+                with patch.object(self.app.job_queue, "submit", return_value={"queued": 1, "existing": 0, "skipped": 0, "invalid": 0, "job_ids": [], "jobs": []}):
+                    response = self.client.post(
+                        "/bib-import/start",
+                        data={"target_folder": "bib-disk", "bib_file": (io.BytesIO(bib_payload), "library.bib")},
+                        content_type="multipart/form-data",
+                    )
+                    payload = response.get_json()
+                    self.assertIsNotNone(payload)
+                    job = self.wait_for_bib_import_job(payload["id"])
+
+        self.app.bib_import_manager._jobs.clear()
+        response = self.client.get(f"/bib-import/status/{job['id']}")
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["id"], job["id"])
+        self.assertEqual(payload["status"], "completed")
+
     def test_prompt_save_route_creates_custom_prompt(self) -> None:
         response = self.client.post(
             "/prompt-save",
