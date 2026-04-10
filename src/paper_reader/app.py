@@ -8,7 +8,9 @@ import shutil
 import tempfile
 import threading
 import time
-from urllib.parse import unquote
+from urllib.error import HTTPError, URLError
+from urllib.parse import unquote, urlparse
+from urllib.request import Request, urlopen
 import zipfile
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -36,6 +38,8 @@ DEFAULT_LOGIN_USERNAME = "admin"
 DEFAULT_LOGIN_PASSWORD = "paperpaperreaderreader12678"
 MAX_LOGIN_FAILURES = 3
 LOGIN_LOCK_SECONDS = 5 * 60
+ARXIV_NEW_STYLE_RE = re.compile(r"^\d{4}\.\d{4,5}(?:v\d+)?$", re.IGNORECASE)
+ARXIV_LEGACY_STYLE_RE = re.compile(r"^[A-Za-z0-9.\-]+/[0-9]{7}(?:v\d+)?$", re.IGNORECASE)
 
 
 @dataclass
@@ -865,6 +869,63 @@ def sha256_for_filestorage(file_storage: Any) -> tuple[int, str]:
     return total, digest.hexdigest()
 
 
+def normalize_arxiv_id(value: str) -> str:
+    raw = unquote(str(value or "").strip())
+    if not raw:
+        raise ValueError("请输入 arXiv ID。")
+
+    if raw.lower().startswith("arxiv:"):
+        raw = raw.split(":", 1)[1].strip()
+
+    if raw.startswith(("http://", "https://")):
+        parsed = urlparse(raw)
+        if not parsed.netloc.lower().endswith("arxiv.org"):
+            raise ValueError("请输入 arXiv ID 或 arxiv.org 链接。")
+        path = parsed.path.strip("/")
+        if path.startswith("abs/"):
+            raw = path[4:]
+        elif path.startswith("pdf/"):
+            raw = path[4:]
+        else:
+            raise ValueError("请输入 arXiv ID 或 arxiv.org 链接。")
+
+    raw = raw.strip().strip("/")
+    if raw.lower().endswith(".pdf"):
+        raw = raw[:-4]
+
+    if ARXIV_NEW_STYLE_RE.fullmatch(raw) or ARXIV_LEGACY_STYLE_RE.fullmatch(raw):
+        return raw
+
+    raise ValueError("arXiv ID 格式不正确。示例：2501.12948、2501.12948v1 或 cs/0112017")
+
+
+def arxiv_pdf_filename(arxiv_id: str) -> str:
+    safe_name = secure_filename(arxiv_id.replace("/", "--")) or "arxiv-paper"
+    return safe_name if safe_name.lower().endswith(".pdf") else f"{safe_name}.pdf"
+
+
+def download_arxiv_pdf(arxiv_id: str, *, timeout: int = 45) -> bytes:
+    request = Request(
+        f"https://arxiv.org/pdf/{arxiv_id}.pdf",
+        headers={"User-Agent": "paper-reader/1.0"},
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            payload = response.read()
+    except HTTPError as exc:
+        if exc.code == 404:
+            raise ValueError(f"找不到 arXiv 论文：{arxiv_id}") from exc
+        raise RuntimeError(f"arXiv 下载失败（HTTP {exc.code}）。") from exc
+    except URLError as exc:
+        raise RuntimeError(f"无法连接 arXiv：{exc.reason}") from exc
+
+    if not payload:
+        raise RuntimeError("arXiv 返回了空文件。")
+    if not payload[:1024].lstrip().startswith(b"%PDF-"):
+        raise RuntimeError("arXiv 返回的内容不是 PDF 文件。")
+    return payload
+
+
 
 def build_groups(papers: list[PaperRecord]) -> list[dict[str, Any]]:
     groups: dict[str, list[PaperRecord]] = {}
@@ -1195,6 +1256,62 @@ def create_app(library_root: Path | None = None) -> Flask:
             ),
         }
 
+    def build_saved_file_result(
+        rel_path: str,
+        *,
+        current_folder: str,
+        query: str,
+        sort_by: str,
+        submit_auto_prompts: bool,
+        show_done: bool,
+        success_label: str,
+        submission_source: str,
+    ) -> dict[str, Any]:
+        if app.library.is_done_rel_path(rel_path):  # type: ignore[attr-defined]
+            app.library._update_done_index_entry(rel_path)  # type: ignore[attr-defined]
+        else:
+            app.library._update_active_index_entry(rel_path)  # type: ignore[attr-defined]
+        active_prompts = app.prompt_store.active_prompts()  # type: ignore[attr-defined]
+        paper = app.library.build_record_for_rel_path(rel_path, [prompt.slug for prompt in active_prompts])  # type: ignore[attr-defined]
+        visible_in_current_view = bool(
+            filter_and_sort_papers([paper], folder=current_folder, query=query, sort_by=sort_by, show_done=show_done)
+        )
+
+        submission = {"queued": 0, "existing": 0, "skipped": 0, "invalid": 0, "job_ids": [], "jobs": []}
+        if submit_auto_prompts:
+            auto_prompts = [prompt for prompt in active_prompts if prompt.auto_run]
+            if auto_prompts:
+                submission = app.job_queue.submit(  # type: ignore[attr-defined]
+                    [rel_path],
+                    [prompt.slug for prompt in auto_prompts],
+                    force=False,
+                    source=submission_source,
+                )
+
+        message = f"{success_label}：{Path(rel_path).name}"
+        if submission["queued"]:
+            message += f"；已提交 {submission['queued']} 个后台 Prompt 任务"
+        elif submission["existing"]:
+            message += "；相关 Prompt 任务已在队列中"
+        elif submission["skipped"]:
+            message += "；Prompt 结果已存在，未重复提交"
+
+        return {
+            "status": "saved",
+            "message": message,
+            "saved_rel_path": rel_path,
+            "paper": serialize_paper_for_view(
+                paper,
+                current_folder=current_folder,
+                query=query,
+                sort_by=sort_by,
+                active_prompt_count=len(active_prompts),
+                show_done=show_done,
+            ),
+            "visible_in_current_view": visible_in_current_view,
+            "submission": submission,
+        }
+
     def process_uploaded_file(
         file: Any,
         *,
@@ -1232,50 +1349,63 @@ def create_app(library_root: Path | None = None) -> Flask:
             raise
 
         rel_path = destination.relative_to(app.config["LIBRARY_ROOT"]).as_posix()
-        if app.library.is_done_rel_path(rel_path):  # type: ignore[attr-defined]
-            app.library._update_done_index_entry(rel_path)  # type: ignore[attr-defined]
-        else:
-            app.library._update_active_index_entry(rel_path)  # type: ignore[attr-defined]
-        active_prompts = app.prompt_store.active_prompts()  # type: ignore[attr-defined]
-        paper = app.library.build_record_for_rel_path(rel_path, [prompt.slug for prompt in active_prompts])  # type: ignore[attr-defined]
-        visible_in_current_view = bool(
-            filter_and_sort_papers([paper], folder=current_folder, query=query, sort_by=sort_by, show_done=show_done)
+        return build_saved_file_result(
+            rel_path,
+            current_folder=current_folder,
+            query=query,
+            sort_by=sort_by,
+            submit_auto_prompts=submit_auto_prompts,
+            show_done=show_done,
+            success_label="上传成功",
+            submission_source="upload",
         )
 
-        submission = {"queued": 0, "existing": 0, "skipped": 0, "invalid": 0, "job_ids": [], "jobs": []}
-        if submit_auto_prompts:
-            auto_prompts = [prompt for prompt in active_prompts if prompt.auto_run]
-            if auto_prompts:
-                submission = app.job_queue.submit(  # type: ignore[attr-defined]
-                    [rel_path],
-                    [prompt.slug for prompt in auto_prompts],
-                    force=False,
-                    source="upload",
-                )
+    def process_arxiv_download(
+        arxiv_id: str,
+        *,
+        target_folder: str,
+        current_folder: str,
+        query: str,
+        sort_by: str,
+        submit_auto_prompts: bool,
+        show_done: bool,
+    ) -> dict[str, Any]:
+        normalized_id = normalize_arxiv_id(arxiv_id)
+        payload = download_arxiv_pdf(normalized_id)
+        filename = arxiv_pdf_filename(normalized_id)
+        file_size = len(payload)
+        file_hash = hashlib.sha256(payload).hexdigest()
+        duplicate_rel_path = app.library.find_duplicate_by_hash(file_size, file_hash)  # type: ignore[attr-defined]
+        if duplicate_rel_path:
+            return {
+                "status": "duplicate",
+                "message": f"检测到重复文件，已跳过：{Path(duplicate_rel_path).name}",
+                "saved_rel_path": None,
+                "duplicate_rel_path": duplicate_rel_path,
+                "normalized_arxiv_id": normalized_id,
+            }
 
-        message = f"上传成功：{destination.name}"
-        if submission["queued"]:
-            message += f"；已提交 {submission['queued']} 个后台 Prompt 任务"
-        elif submission["existing"]:
-            message += "；相关 Prompt 任务已在队列中"
-        elif submission["skipped"]:
-            message += "；Prompt 结果已存在，未重复提交"
+        destination = app.library.make_unique_destination(target_folder, filename)  # type: ignore[attr-defined]
+        try:
+            destination.write_bytes(payload)
+        except Exception:
+            if destination.exists():
+                destination.unlink()
+            raise
 
-        return {
-            "status": "saved",
-            "message": message,
-            "saved_rel_path": rel_path,
-            "paper": serialize_paper_for_view(
-                paper,
-                current_folder=current_folder,
-                query=query,
-                sort_by=sort_by,
-                active_prompt_count=len(active_prompts),
-                show_done=show_done,
-            ),
-            "visible_in_current_view": visible_in_current_view,
-            "submission": submission,
-        }
+        rel_path = destination.relative_to(app.config["LIBRARY_ROOT"]).as_posix()
+        result = build_saved_file_result(
+            rel_path,
+            current_folder=current_folder,
+            query=query,
+            sort_by=sort_by,
+            submit_auto_prompts=submit_auto_prompts,
+            show_done=show_done,
+            success_label="下载成功",
+            submission_source="arxiv",
+        )
+        result["normalized_arxiv_id"] = normalized_id
+        return result
 
     def flash_submission_summary(result: dict[str, Any], *, action_label: str) -> None:
         if result["queued"]:
@@ -1585,6 +1715,57 @@ def create_app(library_root: Path | None = None) -> Flask:
 
         status_code = 200 if result["status"] in {"saved", "duplicate"} else 400
         return result, status_code
+
+    @app.post("/arxiv-download")
+    def arxiv_download_route() -> Any:
+        target_folder = request.form.get("target_folder", "").strip().strip("/")
+        current_folder = request.form.get("folder", target_folder or "").strip().strip("/")
+        query = request.form.get("q", "")
+        sort_by = request.form.get("sort", "date_desc")
+        show_done = parse_checkbox(request.form.get("show_done"))
+        arxiv_id = request.form.get("arxiv_id", "")
+
+        try:
+            result = process_arxiv_download(
+                arxiv_id,
+                target_folder=target_folder,
+                current_folder=current_folder or target_folder,
+                query=query,
+                sort_by=sort_by,
+                submit_auto_prompts=True,
+                show_done=show_done,
+            )
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return redirect_to_index(current_folder or target_folder, query, sort_by, show_done=show_done)
+        except RuntimeError as exc:
+            flash(str(exc), "error")
+            return redirect_to_index(current_folder or target_folder, query, sort_by, show_done=show_done)
+        except Exception as exc:
+            flash(f"arXiv 下载失败：{exc}", "error")
+            return redirect_to_index(current_folder or target_folder, query, sort_by, show_done=show_done)
+
+        if result["status"] == "saved":
+            flash(result["message"], "success")
+            return redirect_to_index(
+                current_folder or target_folder,
+                query,
+                sort_by,
+                result["saved_rel_path"],
+                "source",
+                show_done=show_done,
+            )
+
+        duplicate_rel_path = result.get("duplicate_rel_path")
+        flash(result["message"], "success")
+        return redirect_to_index(
+            current_folder or target_folder,
+            query,
+            sort_by,
+            duplicate_rel_path,
+            "source",
+            show_done=show_done,
+        )
 
     @app.post("/folders")
     def create_folder_route() -> Any:

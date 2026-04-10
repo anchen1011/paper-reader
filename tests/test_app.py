@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from pypdf import PdfWriter
 
-from src.paper_reader.app import create_app, load_env_file_values
+from src.paper_reader.app import create_app, load_env_file_values, normalize_arxiv_id
 from src.paper_reader.markdown_render import render_markdown
 
 
@@ -49,6 +49,20 @@ DOCX_CORE = """<?xml version='1.0' encoding='UTF-8'?>
 """
 
 
+class FakeUrlopenResponse:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+
+    def read(self) -> bytes:
+        return self.payload
+
+    def __enter__(self) -> "FakeUrlopenResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
 class PaperReaderAppTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -83,6 +97,15 @@ class PaperReaderAppTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("wb") as handle:
             writer.write(handle)
+
+    def make_pdf_bytes(self, title: str = "") -> bytes:
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        if title:
+            writer.add_metadata({"/Title": title})
+        buffer = io.BytesIO()
+        writer.write(buffer)
+        return buffer.getvalue()
 
     def make_docx(self, path: Path, title: str, body: str) -> None:
         with zipfile.ZipFile(path, "w") as archive:
@@ -312,6 +335,63 @@ class PaperReaderAppTests(unittest.TestCase):
         self.assertTrue((self.library / "mixed" / "ok.pdf").exists())
         self.assertFalse((self.library / "mixed" / "bad.txt").exists())
         mocked.assert_called_once_with(["mixed/ok.pdf"], ["core-zh"], force=False, source="upload")
+
+    def test_normalize_arxiv_id_accepts_id_prefix_and_url(self) -> None:
+        self.assertEqual(normalize_arxiv_id("2501.12948"), "2501.12948")
+        self.assertEqual(normalize_arxiv_id("arXiv:2501.12948v1"), "2501.12948v1")
+        self.assertEqual(normalize_arxiv_id("https://arxiv.org/abs/2501.12948"), "2501.12948")
+        self.assertEqual(normalize_arxiv_id("https://arxiv.org/pdf/cs/0112017.pdf"), "cs/0112017")
+
+    def test_arxiv_download_route_saves_pdf_and_triggers_auto_prompts(self) -> None:
+        pdf_bytes = self.make_pdf_bytes("Arxiv Download")
+
+        with patch("src.paper_reader.app.urlopen", return_value=FakeUrlopenResponse(pdf_bytes)) as mocked_urlopen:
+            with patch.object(self.app.job_queue, "submit", return_value={"queued": 1, "existing": 0, "skipped": 0, "invalid": 0, "job_ids": [], "jobs": []}) as mocked_submit:
+                response = self.client.post(
+                    "/arxiv-download",
+                    data={
+                        "arxiv_id": "https://arxiv.org/abs/2501.12948v1",
+                        "target_folder": "arxiv/2025",
+                        "folder": "arxiv/2025",
+                        "q": "",
+                        "sort": "date_desc",
+                    },
+                    follow_redirects=True,
+                )
+
+        self.assertEqual(response.status_code, 200)
+        saved_path = self.library / "arxiv" / "2025" / "2501.12948v1.pdf"
+        self.assertTrue(saved_path.exists())
+        self.assertEqual(saved_path.read_bytes(), pdf_bytes)
+        mocked_urlopen.assert_called_once()
+        request_obj = mocked_urlopen.call_args.args[0]
+        self.assertEqual(request_obj.full_url, "https://arxiv.org/pdf/2501.12948v1.pdf")
+        mocked_submit.assert_called_once_with(["arxiv/2025/2501.12948v1.pdf"], ["core-zh"], force=False, source="arxiv")
+
+    def test_arxiv_download_route_skips_duplicate_pdf(self) -> None:
+        pdf_bytes = self.make_pdf_bytes("Duplicate Arxiv PDF")
+        existing_path = self.library / "existing.pdf"
+        existing_path.write_bytes(pdf_bytes)
+
+        with patch("src.paper_reader.app.urlopen", return_value=FakeUrlopenResponse(pdf_bytes)):
+            with patch.object(self.app.job_queue, "submit") as mocked_submit:
+                response = self.client.post(
+                    "/arxiv-download",
+                    data={
+                        "arxiv_id": "2501.12948",
+                        "target_folder": "incoming",
+                        "folder": "incoming",
+                        "q": "",
+                        "sort": "date_desc",
+                    },
+                    follow_redirects=True,
+                )
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("检测到重复文件，已跳过：existing.pdf", html)
+        self.assertFalse((self.library / "incoming" / "2501.12948.pdf").exists())
+        mocked_submit.assert_not_called()
 
     def test_prompt_save_route_creates_custom_prompt(self) -> None:
         response = self.client.post(

@@ -361,6 +361,28 @@
         <div class="upload-file-list" id="upload-file-list"></div>
       </section>
 
+      <form class="tool-grid" action="{{ url_for('arxiv_download_route') }}" method="post">
+        <input type="hidden" name="folder" value="{{ current_folder }}">
+        <input type="hidden" name="q" value="{{ query }}">
+        <input type="hidden" name="sort" value="{{ sort_by }}">
+        <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
+        <label>
+          <span>arXiv ID / 链接</span>
+          <input type="text" name="arxiv_id" placeholder="例如：2501.12948、2501.12948v1 或 https://arxiv.org/abs/2501.12948">
+        </label>
+        <label>
+          <span>目标文件夹</span>
+          <input type="text" name="target_folder" value="{{ current_folder }}" placeholder="例如：arxiv/2025">
+        </label>
+        <div class="library-box">
+          <span class="meta-label">Arxiv 下载</span>
+          <strong>直接从 arXiv 下载 PDF 并保存进当前论文库；保存后也会自动触发已启用且允许自动运行的 Prompt。</strong>
+        </div>
+        <div class="tool-actions">
+          <button type="submit">下载 arXiv PDF</button>
+        </div>
+      </form>
+
       <form class="tool-grid" action="{{ url_for('create_folder_route') }}" method="post">
         <input type="hidden" name="folder" value="{{ current_folder }}">
         <input type="hidden" name="q" value="{{ query }}">
