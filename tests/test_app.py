@@ -473,6 +473,47 @@ class PaperReaderAppTests(unittest.TestCase):
         self.assertTrue((self.library / "batch-errors" / "2501.12948.pdf").exists())
         mocked_submit.assert_called_once_with(["batch-errors/2501.12948.pdf"], ["core-zh"], force=False, source="arxiv")
 
+    def test_arxiv_download_route_builds_duplicate_index_once_per_batch(self) -> None:
+        class DummyIndex:
+            def __init__(self) -> None:
+                self.added: list[tuple[int, str, str]] = []
+
+            def add(self, file_size, file_hash, rel_path) -> None:
+                self.added.append((file_size, file_hash, rel_path))
+
+            def find(self, file_size, file_hash):
+                return None
+
+        sentinel_index = DummyIndex()
+        seen_indexes = []
+        pdf_bytes = self.make_pdf_bytes("Batch Import")
+
+        def fake_find_duplicate(file_size, file_hash, *, duplicate_index=None):
+            seen_indexes.append(duplicate_index)
+            return None
+
+        with patch.object(self.app.library, "build_duplicate_index", return_value=sentinel_index) as mocked_index:
+            with patch("src.paper_reader.app.download_arxiv_pdf", return_value=pdf_bytes):
+                with patch.object(self.app.library, "find_duplicate_by_hash", side_effect=fake_find_duplicate):
+                    with patch.object(self.app.job_queue, "submit", return_value={"queued": 2, "existing": 0, "skipped": 0, "invalid": 0, "job_ids": [], "jobs": []}) as mocked_submit:
+                        response = self.client.post(
+                            "/arxiv-download",
+                            data={
+                                "arxiv_ids": "2501.12948\n2501.12949",
+                                "target_folder": "batch",
+                                "folder": "batch",
+                                "q": "",
+                                "sort": "date_desc",
+                            },
+                            follow_redirects=True,
+                        )
+
+        self.assertEqual(response.status_code, 200)
+        mocked_index.assert_called_once_with()
+        self.assertEqual(seen_indexes, [sentinel_index, sentinel_index])
+        self.assertEqual(len(sentinel_index.added), 2)
+        mocked_submit.assert_called_once_with(["batch/2501.12948.pdf", "batch/2501.12949.pdf"], ["core-zh"], force=False, source="arxiv")
+
     def test_bib_import_start_route_imports_entries_and_writes_unmatched_outputs(self) -> None:
         bib_payload = b"""
 @misc{direct,
@@ -563,6 +604,58 @@ class PaperReaderAppTests(unittest.TestCase):
 
         self.assertEqual(second.status_code, 409)
         self.assertIn("当前已有一个 Bib 导入任务在运行", second.get_json()["message"])
+
+    def test_bib_import_uses_duplicate_index_once_per_job(self) -> None:
+        class DummyIndex:
+            def __init__(self) -> None:
+                self.added: list[tuple[int, str, str]] = []
+
+            def add(self, file_size, file_hash, rel_path) -> None:
+                self.added.append((file_size, file_hash, rel_path))
+
+            def find(self, file_size, file_hash):
+                return None
+
+        bib_payload = b"""
+@misc{one,
+  title = {Entry One}
+}
+@misc{two,
+  title = {Entry Two}
+}
+"""
+        sentinel_index = DummyIndex()
+        seen_indexes = []
+        pdf_bytes = self.make_pdf_bytes("Bib Import")
+
+        def fake_find(entry, timeout=20):
+            if entry.get("title") == "Entry One":
+                return "2501.12948", "search"
+            return "2501.12949", "search"
+
+        def fake_find_duplicate(file_size, file_hash, *, duplicate_index=None):
+            seen_indexes.append(duplicate_index)
+            return None
+
+        with patch.object(self.app.library, "build_duplicate_index", return_value=sentinel_index) as mocked_index:
+            with patch("src.paper_reader.app.bib_import_utils.find_arxiv_id_for_bib_entry", side_effect=fake_find):
+                with patch("src.paper_reader.app.download_arxiv_pdf", return_value=pdf_bytes):
+                    with patch.object(self.app.library, "find_duplicate_by_hash", side_effect=fake_find_duplicate):
+                        with patch.object(self.app.job_queue, "submit", return_value={"queued": 2, "existing": 0, "skipped": 0, "invalid": 0, "job_ids": [], "jobs": []}) as mocked_submit:
+                            response = self.client.post(
+                                "/bib-import/start",
+                                data={"target_folder": "bib", "bib_file": (io.BytesIO(bib_payload), "library.bib")},
+                                content_type="multipart/form-data",
+                            )
+                            payload = response.get_json()
+                            self.assertIsNotNone(payload)
+                            job = self.wait_for_bib_import_job(payload["id"])
+
+        self.assertEqual(job["status"], "completed")
+        mocked_index.assert_called_once_with()
+        self.assertEqual(seen_indexes, [sentinel_index, sentinel_index])
+        self.assertEqual(len(sentinel_index.added), 2)
+        mocked_submit.assert_called_once_with(["bib/2501.12948.pdf", "bib/2501.12949.pdf"], ["core-zh"], force=False, source="bib-import")
 
     def test_index_restores_latest_bib_import_snapshot_after_refresh(self) -> None:
         bib_payload = b"@misc{direct, title={Direct Arxiv Entry}, url={https://arxiv.org/abs/2501.12948}}"

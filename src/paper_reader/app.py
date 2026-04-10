@@ -106,6 +106,17 @@ class BibImportJobRecord:
     finished_at: str | None = None
 
 
+@dataclass
+class DuplicateLookupIndex:
+    by_size: dict[int, dict[str, str]] = field(default_factory=dict)
+
+    def find(self, file_size: int, file_hash: str) -> str | None:
+        return self.by_size.get(file_size, {}).get(file_hash)
+
+    def add(self, file_size: int, file_hash: str, rel_path: str) -> None:
+        self.by_size.setdefault(file_size, {})[file_hash] = rel_path
+
+
 class LoginGuard:
     def __init__(self) -> None:
         self._attempts: dict[str, LoginAttemptState] = {}
@@ -611,7 +622,25 @@ class PaperLibrary:
             counter += 1
         return candidate
 
-    def find_duplicate_by_hash(self, file_size: int, file_hash: str) -> str | None:
+    def build_duplicate_index(self) -> DuplicateLookupIndex:
+        index = DuplicateLookupIndex()
+        for path in self.iter_documents():
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
+            index.add(stat.st_size, self.hash_for_path(path), path.relative_to(self.root).as_posix())
+        return index
+
+    def find_duplicate_by_hash(
+        self,
+        file_size: int,
+        file_hash: str,
+        *,
+        duplicate_index: DuplicateLookupIndex | None = None,
+    ) -> str | None:
+        if duplicate_index is not None:
+            return duplicate_index.find(file_size, file_hash)
         for path in self.iter_documents():
             try:
                 if path.stat().st_size != file_size:
@@ -1411,13 +1440,18 @@ def create_app(library_root: Path | None = None) -> Flask:
         submit_auto_prompts: bool,
         show_done: bool,
         include_paper_view: bool = True,
+        duplicate_index: DuplicateLookupIndex | None = None,
     ) -> dict[str, Any]:
         normalized_id = normalize_arxiv_id(arxiv_id)
         payload = download_arxiv_pdf(normalized_id)
         filename = arxiv_pdf_filename(normalized_id)
         file_size = len(payload)
         file_hash = hashlib.sha256(payload).hexdigest()
-        duplicate_rel_path = app.library.find_duplicate_by_hash(file_size, file_hash)  # type: ignore[attr-defined]
+        duplicate_rel_path = app.library.find_duplicate_by_hash(  # type: ignore[attr-defined]
+            file_size,
+            file_hash,
+            duplicate_index=duplicate_index,
+        )
         if duplicate_rel_path:
             return {
                 "status": "duplicate",
@@ -1436,6 +1470,8 @@ def create_app(library_root: Path | None = None) -> Flask:
             raise
 
         rel_path = destination.relative_to(app.config["LIBRARY_ROOT"]).as_posix()
+        if duplicate_index is not None:
+            duplicate_index.add(file_size, file_hash, rel_path)
         result = build_saved_file_result(
             rel_path,
             current_folder=current_folder,
@@ -1641,6 +1677,7 @@ def create_app(library_root: Path | None = None) -> Flask:
             unmatched_items: list[bib_import_utils.BibImportUnmatchedItem] = []
             imported_rel_paths: list[str] = []
             duplicate_rel_paths: list[str] = []
+            duplicate_index = app.library.build_duplicate_index()  # type: ignore[attr-defined]
             total_entries = len(entries)
             self._update_job(job_id, total_entries=total_entries, message=f"共检测到 {total_entries} 篇文献，开始导入。")
 
@@ -1688,6 +1725,7 @@ def create_app(library_root: Path | None = None) -> Flask:
                                 submit_auto_prompts=False,
                                 show_done=False,
                                 include_paper_view=False,
+                                duplicate_index=duplicate_index,
                             )
                         except Exception as exc:
                             unmatched_entries.append(dict(entry))
@@ -2106,6 +2144,7 @@ def create_app(library_root: Path | None = None) -> Flask:
         errors: list[str] = []
         seen_ids: set[str] = set()
         skipped_input_duplicates = 0
+        duplicate_index = app.library.build_duplicate_index()  # type: ignore[attr-defined]
 
         for requested_id in requested_ids:
             try:
@@ -2128,6 +2167,7 @@ def create_app(library_root: Path | None = None) -> Flask:
                     sort_by=sort_by,
                     submit_auto_prompts=False,
                     show_done=show_done,
+                    duplicate_index=duplicate_index,
                 )
             except (ValueError, RuntimeError) as exc:
                 errors.append(f"{normalized_id}: {exc}")
