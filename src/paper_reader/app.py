@@ -8,11 +8,12 @@ import shutil
 import tempfile
 import threading
 import time
+import uuid
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
 import zipfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -21,6 +22,7 @@ from flask import Flask, abort, flash, redirect, render_template, request, send_
 from markupsafe import Markup
 from werkzeug.utils import secure_filename
 
+from . import bib_import as bib_import_utils
 from .ai_summary import DEFAULT_MODEL, DEFAULT_USER_PROMPT, run_prompt_on_document
 from .document_utils import ALLOWED_EXTENSIONS, extract_document_metadata
 from .markdown_render import render_markdown
@@ -33,6 +35,7 @@ CACHE_FILE_NAME = ".paper_reader_index.json"
 DONE_INDEX_FILE_NAME = ".paper_reader_done_index.json"
 SUMMARY_DIR_NAME = ".paper-reader-ai"
 DONE_DIR_NAME = "DONE"
+BIB_IMPORT_DIR_NAME = ".paper-reader-bib-imports"
 DEFAULT_BATCH_PANEL_PAGE_SIZE = 50
 DEFAULT_LOGIN_USERNAME = "admin"
 DEFAULT_LOGIN_PASSWORD = "paperpaperreaderreader12678"
@@ -40,6 +43,7 @@ MAX_LOGIN_FAILURES = 3
 LOGIN_LOCK_SECONDS = 5 * 60
 ARXIV_NEW_STYLE_RE = re.compile(r"^\d{4}\.\d{4,5}(?:v\d+)?$", re.IGNORECASE)
 ARXIV_LEGACY_STYLE_RE = re.compile(r"^[A-Za-z0-9.\-]+/[0-9]{7}(?:v\d+)?$", re.IGNORECASE)
+ARXIV_INPUT_SPLIT_RE = re.compile(r"[\r\n,，;；]+")
 
 
 @dataclass
@@ -73,6 +77,33 @@ class ScanResult:
 class LoginAttemptState:
     failed_count: int = 0
     locked_until: float = 0.0
+
+
+@dataclass
+class BibImportJobRecord:
+    id: str
+    source_name: str
+    target_folder: str
+    status: str
+    progress: int
+    message: str
+    error: str | None
+    total_entries: int
+    processed_entries: int
+    imported_count: int
+    duplicate_count: int
+    unmatched_count: int
+    current_label: str
+    source_bib_rel_path: str | None
+    unmatched_bib_rel_path: str | None
+    unmatched_list_rel_path: str | None
+    imported_rel_paths: list[str] = field(default_factory=list)
+    duplicate_rel_paths: list[str] = field(default_factory=list)
+    auto_prompt_summary: dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
+    updated_at: str = ""
+    started_at: str | None = None
+    finished_at: str | None = None
 
 
 class LoginGuard:
@@ -899,6 +930,11 @@ def normalize_arxiv_id(value: str) -> str:
     raise ValueError("arXiv ID 格式不正确。示例：2501.12948、2501.12948v1 或 cs/0112017")
 
 
+def parse_arxiv_input(value: str) -> list[str]:
+    tokens = [token.strip() for token in ARXIV_INPUT_SPLIT_RE.split(str(value or ""))]
+    return [token for token in tokens if token]
+
+
 def arxiv_pdf_filename(arxiv_id: str) -> str:
     safe_name = secure_filename(arxiv_id.replace("/", "--")) or "arxiv-paper"
     return safe_name if safe_name.lower().endswith(".pdf") else f"{safe_name}.pdf"
@@ -1266,6 +1302,7 @@ def create_app(library_root: Path | None = None) -> Flask:
         show_done: bool,
         success_label: str,
         submission_source: str,
+        include_paper_view: bool = True,
     ) -> dict[str, Any]:
         if app.library.is_done_rel_path(rel_path):  # type: ignore[attr-defined]
             app.library._update_done_index_entry(rel_path)  # type: ignore[attr-defined]
@@ -1273,9 +1310,20 @@ def create_app(library_root: Path | None = None) -> Flask:
             app.library._update_active_index_entry(rel_path)  # type: ignore[attr-defined]
         active_prompts = app.prompt_store.active_prompts()  # type: ignore[attr-defined]
         paper = app.library.build_record_for_rel_path(rel_path, [prompt.slug for prompt in active_prompts])  # type: ignore[attr-defined]
-        visible_in_current_view = bool(
-            filter_and_sort_papers([paper], folder=current_folder, query=query, sort_by=sort_by, show_done=show_done)
-        )
+        visible_in_current_view = None
+        paper_payload = None
+        if include_paper_view:
+            visible_in_current_view = bool(
+                filter_and_sort_papers([paper], folder=current_folder, query=query, sort_by=sort_by, show_done=show_done)
+            )
+            paper_payload = serialize_paper_for_view(
+                paper,
+                current_folder=current_folder,
+                query=query,
+                sort_by=sort_by,
+                active_prompt_count=len(active_prompts),
+                show_done=show_done,
+            )
 
         submission = {"queued": 0, "existing": 0, "skipped": 0, "invalid": 0, "job_ids": [], "jobs": []}
         if submit_auto_prompts:
@@ -1300,14 +1348,7 @@ def create_app(library_root: Path | None = None) -> Flask:
             "status": "saved",
             "message": message,
             "saved_rel_path": rel_path,
-            "paper": serialize_paper_for_view(
-                paper,
-                current_folder=current_folder,
-                query=query,
-                sort_by=sort_by,
-                active_prompt_count=len(active_prompts),
-                show_done=show_done,
-            ),
+            "paper": paper_payload,
             "visible_in_current_view": visible_in_current_view,
             "submission": submission,
         }
@@ -1369,6 +1410,7 @@ def create_app(library_root: Path | None = None) -> Flask:
         sort_by: str,
         submit_auto_prompts: bool,
         show_done: bool,
+        include_paper_view: bool = True,
     ) -> dict[str, Any]:
         normalized_id = normalize_arxiv_id(arxiv_id)
         payload = download_arxiv_pdf(normalized_id)
@@ -1403,9 +1445,265 @@ def create_app(library_root: Path | None = None) -> Flask:
             show_done=show_done,
             success_label="下载成功",
             submission_source="arxiv",
+            include_paper_view=include_paper_view,
         )
         result["normalized_arxiv_id"] = normalized_id
         return result
+
+    class BibImportManager:
+        ACTIVE_STATUSES = {"queued", "running"}
+        TERMINAL_STATUSES = {"completed", "failed"}
+
+        def __init__(self, library_root: Path):
+            self.library_root = library_root.resolve()
+            self.job_root = self.library_root / BIB_IMPORT_DIR_NAME
+            self.job_root.mkdir(parents=True, exist_ok=True)
+            self._lock = threading.Lock()
+            self._jobs: dict[str, BibImportJobRecord] = {}
+
+        def _timestamp(self) -> str:
+            return datetime.utcnow().isoformat(timespec="seconds")
+
+        def _job_dir(self, job_id: str) -> Path:
+            return self.job_root / job_id
+
+        def _status_path(self, job_id: str) -> Path:
+            return self._job_dir(job_id) / "status.json"
+
+        def _persist_locked(self, job: BibImportJobRecord) -> None:
+            payload = asdict(job)
+            path = self._status_path(job.id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = path.with_suffix(".tmp")
+            temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp_path.replace(path)
+
+        def _update_job(self, job_id: str, **changes: Any) -> BibImportJobRecord | None:
+            with self._lock:
+                job = self._jobs.get(job_id)
+                if job is None:
+                    return None
+                for key, value in changes.items():
+                    setattr(job, key, value)
+                job.updated_at = self._timestamp()
+                self._persist_locked(job)
+                return job
+
+        def start(self, file_storage: Any, *, target_folder: str) -> BibImportJobRecord:
+            filename = secure_filename(getattr(file_storage, "filename", "") or "") or "library.bib"
+            if Path(filename).suffix.lower() != ".bib":
+                raise ValueError("只支持导入 .bib 文件。")
+
+            payload = file_storage.read()
+            try:
+                file_storage.stream.seek(0)
+            except Exception:
+                pass
+            if not payload:
+                raise ValueError("上传的 .bib 文件为空。")
+
+            with self._lock:
+                active = next((job for job in self._jobs.values() if job.status in self.ACTIVE_STATUSES), None)
+                if active is not None:
+                    raise RuntimeError("当前已有一个 Bib 导入任务在运行，请等待其完成后再开始新的导入。")
+
+                job_id = uuid.uuid4().hex[:12]
+                now = self._timestamp()
+                source_path = self._job_dir(job_id) / filename
+                source_path.parent.mkdir(parents=True, exist_ok=True)
+                source_path.write_bytes(payload)
+                job = BibImportJobRecord(
+                    id=job_id,
+                    source_name=filename,
+                    target_folder=target_folder,
+                    status="queued",
+                    progress=0,
+                    message="Bib 导入任务已创建，等待开始。",
+                    error=None,
+                    total_entries=0,
+                    processed_entries=0,
+                    imported_count=0,
+                    duplicate_count=0,
+                    unmatched_count=0,
+                    current_label="",
+                    source_bib_rel_path=source_path.relative_to(self.library_root).as_posix(),
+                    unmatched_bib_rel_path=None,
+                    unmatched_list_rel_path=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+                self._jobs[job.id] = job
+                self._persist_locked(job)
+
+            worker = threading.Thread(
+                target=self._run_job,
+                args=(job.id, source_path),
+                name=f"paper-reader-bib-import-{job.id}",
+                daemon=True,
+            )
+            worker.start()
+            return job
+
+        def get_job(self, job_id: str) -> BibImportJobRecord | None:
+            with self._lock:
+                return self._jobs.get(job_id)
+
+        def _run_job(self, job_id: str, source_path: Path) -> None:
+            self._update_job(job_id, status="running", progress=1, started_at=self._timestamp(), message="正在解析 Bib 文件。")
+            try:
+                text = source_path.read_text(encoding="utf-8", errors="replace")
+                entries = bib_import_utils.load_bib_entries(text)
+                if not entries:
+                    raise ValueError("Bib 文件中没有可导入的文献条目。")
+            except Exception as exc:
+                self._update_job(
+                    job_id,
+                    status="failed",
+                    progress=100,
+                    error=str(exc),
+                    message="Bib 文件解析失败。",
+                    finished_at=self._timestamp(),
+                )
+                return
+
+            unmatched_entries: list[dict[str, Any]] = []
+            unmatched_items: list[bib_import_utils.BibImportUnmatchedItem] = []
+            imported_rel_paths: list[str] = []
+            duplicate_rel_paths: list[str] = []
+            total_entries = len(entries)
+            self._update_job(job_id, total_entries=total_entries, message=f"共检测到 {total_entries} 篇文献，开始导入。")
+
+            for index, entry in enumerate(entries, start=1):
+                cite_key = str(entry.get("ID") or "")
+                title = str(entry.get("title") or "").strip() or cite_key or f"Entry {index}"
+                self._update_job(
+                    job_id,
+                    current_label=title,
+                    message=f"正在处理 {index}/{total_entries}: {title}",
+                )
+
+                extracted_hint = bib_import_utils.extract_arxiv_id_from_entry(entry)
+                try:
+                    arxiv_id, match_source = bib_import_utils.find_arxiv_id_for_bib_entry(entry)
+                except Exception as exc:
+                    unmatched_entries.append(dict(entry))
+                    unmatched_items.append(
+                        bib_import_utils.BibImportUnmatchedItem(
+                            cite_key=cite_key,
+                            title=title,
+                            reason=str(exc),
+                            raw_arxiv_hint=extracted_hint,
+                        )
+                    )
+                else:
+                    if not arxiv_id:
+                        unmatched_entries.append(dict(entry))
+                        unmatched_items.append(
+                            bib_import_utils.BibImportUnmatchedItem(
+                                cite_key=cite_key,
+                                title=title,
+                                reason="未找到可信 arXiv 匹配。",
+                                raw_arxiv_hint=extracted_hint,
+                            )
+                        )
+                    else:
+                        try:
+                            result = process_arxiv_download(
+                                arxiv_id,
+                                target_folder=self._jobs[job_id].target_folder,
+                                current_folder=self._jobs[job_id].target_folder,
+                                query="",
+                                sort_by="date_desc",
+                                submit_auto_prompts=False,
+                                show_done=False,
+                                include_paper_view=False,
+                            )
+                        except Exception as exc:
+                            unmatched_entries.append(dict(entry))
+                            reason = str(exc)
+                            if match_source == "search":
+                                reason = f"搜索到 arXiv {arxiv_id}，但导入失败：{reason}"
+                            unmatched_items.append(
+                                bib_import_utils.BibImportUnmatchedItem(
+                                    cite_key=cite_key,
+                                    title=title,
+                                    reason=reason,
+                                    raw_arxiv_hint=arxiv_id,
+                                )
+                            )
+                        else:
+                            if result["status"] == "saved" and result.get("saved_rel_path"):
+                                imported_rel_paths.append(str(result["saved_rel_path"]))
+                            elif result.get("duplicate_rel_path"):
+                                duplicate_rel_paths.append(str(result["duplicate_rel_path"]))
+                            else:
+                                unmatched_entries.append(dict(entry))
+                                unmatched_items.append(
+                                    bib_import_utils.BibImportUnmatchedItem(
+                                        cite_key=cite_key,
+                                        title=title,
+                                        reason="导入结果未知，已标记为未导入。",
+                                        raw_arxiv_hint=arxiv_id,
+                                    )
+                                )
+
+                progress = min(99, max(1, round(index * 100 / max(total_entries, 1))))
+                self._update_job(
+                    job_id,
+                    processed_entries=index,
+                    imported_count=len(imported_rel_paths),
+                    duplicate_count=len(duplicate_rel_paths),
+                    unmatched_count=len(unmatched_items),
+                    imported_rel_paths=list(imported_rel_paths),
+                    duplicate_rel_paths=list(duplicate_rel_paths),
+                    progress=progress,
+                )
+
+            unmatched_bib_rel_path: str | None = None
+            unmatched_list_rel_path: str | None = None
+            if unmatched_entries:
+                job_dir = self._job_dir(job_id)
+                unmatched_bib_path = job_dir / "unimported.bib"
+                unmatched_list_path = job_dir / "unimported.txt"
+                unmatched_bib_path.write_text(
+                    bib_import_utils.dump_bib_entries(unmatched_entries),
+                    encoding="utf-8",
+                )
+                unmatched_list_path.write_text(
+                    bib_import_utils.dump_unmatched_list(unmatched_items),
+                    encoding="utf-8",
+                )
+                unmatched_bib_rel_path = unmatched_bib_path.relative_to(self.library_root).as_posix()
+                unmatched_list_rel_path = unmatched_list_path.relative_to(self.library_root).as_posix()
+
+            auto_prompt_summary = {"queued": 0, "existing": 0, "skipped": 0, "invalid": 0, "job_ids": [], "jobs": []}
+            if imported_rel_paths:
+                auto_prompts = app.prompt_store.auto_prompts()  # type: ignore[attr-defined]
+                if auto_prompts:
+                    auto_prompt_summary = app.job_queue.submit(  # type: ignore[attr-defined]
+                        imported_rel_paths,
+                        [prompt.slug for prompt in auto_prompts],
+                        force=False,
+                        source="bib-import",
+                    )
+
+            summary_message = (
+                f"Bib 导入完成：新增 {len(imported_rel_paths)} 篇，重复 {len(duplicate_rel_paths)} 篇，未导入 {len(unmatched_items)} 篇。"
+            )
+            self._update_job(
+                job_id,
+                status="completed",
+                progress=100,
+                message=summary_message,
+                error=None,
+                current_label="",
+                unmatched_bib_rel_path=unmatched_bib_rel_path,
+                unmatched_list_rel_path=unmatched_list_rel_path,
+                auto_prompt_summary=auto_prompt_summary,
+                finished_at=self._timestamp(),
+            )
+
+    app.bib_import_manager = BibImportManager(app.config["LIBRARY_ROOT"])  # type: ignore[attr-defined]
 
     def flash_submission_summary(result: dict[str, Any], *, action_label: str) -> None:
         if result["queued"]:
@@ -1723,49 +2021,117 @@ def create_app(library_root: Path | None = None) -> Flask:
         query = request.form.get("q", "")
         sort_by = request.form.get("sort", "date_desc")
         show_done = parse_checkbox(request.form.get("show_done"))
-        arxiv_id = request.form.get("arxiv_id", "")
+        raw_inputs = request.form.get("arxiv_ids", "") or request.form.get("arxiv_id", "")
+        requested_ids = parse_arxiv_input(raw_inputs)
 
-        try:
-            result = process_arxiv_download(
-                arxiv_id,
-                target_folder=target_folder,
-                current_folder=current_folder or target_folder,
-                query=query,
-                sort_by=sort_by,
-                submit_auto_prompts=True,
-                show_done=show_done,
-            )
-        except ValueError as exc:
-            flash(str(exc), "error")
-            return redirect_to_index(current_folder or target_folder, query, sort_by, show_done=show_done)
-        except RuntimeError as exc:
-            flash(str(exc), "error")
-            return redirect_to_index(current_folder or target_folder, query, sort_by, show_done=show_done)
-        except Exception as exc:
-            flash(f"arXiv 下载失败：{exc}", "error")
+        if not requested_ids:
+            flash("请输入至少一个 arXiv ID 或 arxiv.org 链接。", "error")
             return redirect_to_index(current_folder or target_folder, query, sort_by, show_done=show_done)
 
-        if result["status"] == "saved":
-            flash(result["message"], "success")
-            return redirect_to_index(
-                current_folder or target_folder,
-                query,
-                sort_by,
-                result["saved_rel_path"],
-                "source",
-                show_done=show_done,
-            )
+        saved_rel_paths: list[str] = []
+        duplicate_rel_paths: list[str] = []
+        errors: list[str] = []
+        seen_ids: set[str] = set()
+        skipped_input_duplicates = 0
 
-        duplicate_rel_path = result.get("duplicate_rel_path")
-        flash(result["message"], "success")
+        for requested_id in requested_ids:
+            try:
+                normalized_id = normalize_arxiv_id(requested_id)
+            except ValueError as exc:
+                errors.append(f"{requested_id}: {exc}")
+                continue
+
+            if normalized_id in seen_ids:
+                skipped_input_duplicates += 1
+                continue
+            seen_ids.add(normalized_id)
+
+            try:
+                result = process_arxiv_download(
+                    normalized_id,
+                    target_folder=target_folder,
+                    current_folder=current_folder or target_folder,
+                    query=query,
+                    sort_by=sort_by,
+                    submit_auto_prompts=False,
+                    show_done=show_done,
+                )
+            except (ValueError, RuntimeError) as exc:
+                errors.append(f"{normalized_id}: {exc}")
+                continue
+            except Exception as exc:
+                errors.append(f"{normalized_id}: arXiv 下载失败：{exc}")
+                continue
+
+            if result["status"] == "saved" and result.get("saved_rel_path"):
+                saved_rel_paths.append(str(result["saved_rel_path"]))
+            elif result.get("duplicate_rel_path"):
+                duplicate_rel_paths.append(str(result["duplicate_rel_path"]))
+
+        if saved_rel_paths:
+            flash(f"arXiv 下载完成：新增 {len(saved_rel_paths)} 篇论文。", "success")
+            auto_prompts = app.prompt_store.auto_prompts()  # type: ignore[attr-defined]
+            if auto_prompts:
+                submission = app.job_queue.submit(  # type: ignore[attr-defined]
+                    saved_rel_paths,
+                    [prompt.slug for prompt in auto_prompts],
+                    force=False,
+                    source="arxiv",
+                )
+                flash_submission_summary(submission, action_label="arXiv 自动 Prompt 处理已转为后台任务")
+        if duplicate_rel_paths:
+            flash(f"检测到 {len(duplicate_rel_paths)} 篇重复论文，已自动跳过。", "success")
+        if skipped_input_duplicates:
+            flash(f"输入中有 {skipped_input_duplicates} 个重复 arXiv ID，已忽略。", "success")
+        if errors:
+            for message in errors[:5]:
+                flash(message, "error")
+            if len(errors) > 5:
+                flash(f"还有 {len(errors) - 5} 个 arXiv ID 下载失败，请检查输入格式或网络。", "error")
+
+        selected_rel_path = saved_rel_paths[0] if saved_rel_paths else (duplicate_rel_paths[0] if duplicate_rel_paths else None)
         return redirect_to_index(
             current_folder or target_folder,
             query,
             sort_by,
-            duplicate_rel_path,
-            "source",
+            selected_rel_path,
+            "source" if selected_rel_path else None,
             show_done=show_done,
         )
+
+    def serialize_bib_import_job(job: BibImportJobRecord) -> dict[str, Any]:
+        payload = asdict(job)
+        payload["unmatched_bib_url"] = (
+            url_for("serve_file", rel_path=job.unmatched_bib_rel_path) if job.unmatched_bib_rel_path else None
+        )
+        payload["unmatched_list_url"] = (
+            url_for("serve_file", rel_path=job.unmatched_list_rel_path) if job.unmatched_list_rel_path else None
+        )
+        payload["source_bib_url"] = url_for("serve_file", rel_path=job.source_bib_rel_path) if job.source_bib_rel_path else None
+        return payload
+
+    @app.post("/bib-import/start")
+    def bib_import_start_route() -> Any:
+        file = request.files.get("bib_file")
+        target_folder = request.form.get("target_folder", "").strip().strip("/")
+        if file is None or not file.filename:
+            return {"status": "error", "message": "请选择一个 .bib 文件。"}, 400
+        try:
+            job = app.bib_import_manager.start(file, target_folder=target_folder)  # type: ignore[attr-defined]
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}, 400
+        except RuntimeError as exc:
+            return {"status": "error", "message": str(exc)}, 409
+        except Exception as exc:
+            return {"status": "error", "message": f"Bib 导入启动失败：{exc}"}, 500
+        return serialize_bib_import_job(job)
+
+    @app.get("/bib-import/status/<job_id>")
+    def bib_import_status_route(job_id: str) -> Any:
+        job = app.bib_import_manager.get_job(job_id)  # type: ignore[attr-defined]
+        if job is None:
+            return {"status": "error", "message": "Bib 导入任务不存在。"}, 404
+        return serialize_bib_import_job(job)
 
     @app.post("/folders")
     def create_folder_route() -> Any:

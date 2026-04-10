@@ -368,7 +368,7 @@
         <input type="hidden" name="show_done" value="{{ '1' if show_done else '' }}">
         <label>
           <span>arXiv ID / 链接</span>
-          <input type="text" name="arxiv_id" placeholder="例如：2501.12948、2501.12948v1 或 https://arxiv.org/abs/2501.12948">
+          <textarea name="arxiv_ids" rows="4" placeholder="支持单个或批量输入；可一行一个，或用逗号分隔。&#10;例如：&#10;2501.12948&#10;2501.12948v1&#10;https://arxiv.org/abs/2501.12948"></textarea>
         </label>
         <label>
           <span>目标文件夹</span>
@@ -376,12 +376,46 @@
         </label>
         <div class="library-box">
           <span class="meta-label">Arxiv 下载</span>
-          <strong>直接从 arXiv 下载 PDF 并保存进当前论文库；保存后也会自动触发已启用且允许自动运行的 Prompt。</strong>
+          <strong>直接从 arXiv 下载 PDF 并保存进当前论文库；支持批量输入，系统会自动跳过重复文件，并为新论文触发已启用且允许自动运行的 Prompt。</strong>
         </div>
         <div class="tool-actions">
           <button type="submit">下载 arXiv PDF</button>
         </div>
       </form>
+
+      <form class="tool-grid" id="bib-import-form" action="{{ url_for('bib_import_start_route') }}" method="post" enctype="multipart/form-data" data-status-url-template="{{ url_for('bib_import_status_route', job_id='__JOB_ID__') }}">
+        <input type="hidden" name="target_folder" value="{{ current_folder }}">
+        <label>
+          <span>Zotero Bib 文件</span>
+          <input type="file" name="bib_file" accept=".bib">
+        </label>
+        <div class="library-box">
+          <span class="meta-label">Bib 文献库导入</span>
+          <strong>优先读取条目中的 arXiv 链接 / DOI / note；没有 arXiv 信息时会联网按标题检索，无法可信匹配的条目会汇总成未导入清单。</strong>
+        </div>
+        <div class="tool-actions">
+          <button type="submit" id="bib-import-submit">导入 Bib 文献库</button>
+        </div>
+      </form>
+      <section class="upload-visualizer" id="bib-import-visualizer" hidden>
+        <div class="upload-visualizer-head">
+          <div>
+            <strong>Bib 导入进度</strong>
+            <span id="bib-import-summary-text">等待导入</span>
+          </div>
+          <span id="bib-import-overall-percent">0%</span>
+        </div>
+        <div class="job-progress upload-overall-progress"><span id="bib-import-overall-bar" style="width: 0%"></span></div>
+        <div class="upload-stat-strip">
+          <div class="job-summary-card"><span>总条目</span><strong id="bib-import-total-count">0</strong></div>
+          <div class="job-summary-card"><span>已处理</span><strong id="bib-import-processed-count">0</strong></div>
+          <div class="job-summary-card"><span>新增</span><strong id="bib-import-imported-count">0</strong></div>
+          <div class="job-summary-card"><span>重复</span><strong id="bib-import-duplicate-count">0</strong></div>
+          <div class="job-summary-card"><span>未导入</span><strong id="bib-import-unmatched-count">0</strong></div>
+        </div>
+        <p class="tool-hint" id="bib-import-current-entry">还没有开始处理。</p>
+        <div class="tool-actions" id="bib-import-result-links"></div>
+      </section>
 
       <form class="tool-grid" action="{{ url_for('create_folder_route') }}" method="post">
         <input type="hidden" name="folder" value="{{ current_folder }}">
@@ -568,6 +602,18 @@
       const uploadCompleteCount = document.getElementById("upload-complete-count");
       const uploadDuplicateCount = document.getElementById("upload-duplicate-count");
       const uploadErrorCount = document.getElementById("upload-error-count");
+      const bibImportForm = document.getElementById("bib-import-form");
+      const bibImportVisualizer = document.getElementById("bib-import-visualizer");
+      const bibImportSummaryText = document.getElementById("bib-import-summary-text");
+      const bibImportOverallPercent = document.getElementById("bib-import-overall-percent");
+      const bibImportOverallBar = document.getElementById("bib-import-overall-bar");
+      const bibImportTotalCount = document.getElementById("bib-import-total-count");
+      const bibImportProcessedCount = document.getElementById("bib-import-processed-count");
+      const bibImportImportedCount = document.getElementById("bib-import-imported-count");
+      const bibImportDuplicateCount = document.getElementById("bib-import-duplicate-count");
+      const bibImportUnmatchedCount = document.getElementById("bib-import-unmatched-count");
+      const bibImportCurrentEntry = document.getElementById("bib-import-current-entry");
+      const bibImportResultLinks = document.getElementById("bib-import-result-links");
       const paperList = document.getElementById("paper-list");
       const paperListEmpty = document.getElementById("paper-list-empty");
       const paperCountNode = document.getElementById("paper-count");
@@ -1049,6 +1095,91 @@
         if (submitButton) submitButton.disabled = false;
       }
 
+      let bibImportTimer = null;
+
+      function bibStatusUrl(jobId) {
+        return (bibImportForm.dataset.statusUrlTemplate || "").replace("__JOB_ID__", encodeURIComponent(jobId));
+      }
+
+      function renderBibImport(snapshot) {
+        if (!bibImportVisualizer || !snapshot) return;
+        bibImportVisualizer.hidden = false;
+        const progress = Number(snapshot.progress || 0);
+        if (bibImportSummaryText) bibImportSummaryText.textContent = snapshot.message || "正在导入 Bib 文献库";
+        if (bibImportOverallPercent) bibImportOverallPercent.textContent = `${progress}%`;
+        if (bibImportOverallBar) bibImportOverallBar.style.width = `${progress}%`;
+        if (bibImportTotalCount) bibImportTotalCount.textContent = String(snapshot.total_entries || 0);
+        if (bibImportProcessedCount) bibImportProcessedCount.textContent = String(snapshot.processed_entries || 0);
+        if (bibImportImportedCount) bibImportImportedCount.textContent = String(snapshot.imported_count || 0);
+        if (bibImportDuplicateCount) bibImportDuplicateCount.textContent = String(snapshot.duplicate_count || 0);
+        if (bibImportUnmatchedCount) bibImportUnmatchedCount.textContent = String(snapshot.unmatched_count || 0);
+        if (bibImportCurrentEntry) {
+          bibImportCurrentEntry.textContent = snapshot.current_label
+            ? `当前处理：${snapshot.current_label}`
+            : (snapshot.error || "导入任务已结束。");
+        }
+        if (bibImportResultLinks) {
+          const links = [];
+          if (snapshot.unmatched_bib_url) {
+            links.push(`<a class="button-link secondary" href="${snapshot.unmatched_bib_url}" target="_blank" rel="noreferrer">未导入 Bib</a>`);
+          }
+          if (snapshot.unmatched_list_url) {
+            links.push(`<a class="button-link secondary" href="${snapshot.unmatched_list_url}" target="_blank" rel="noreferrer">未导入清单</a>`);
+          }
+          if (snapshot.source_bib_url) {
+            links.push(`<a class="button-link secondary" href="${snapshot.source_bib_url}" target="_blank" rel="noreferrer">原始 Bib</a>`);
+          }
+          bibImportResultLinks.innerHTML = links.join("");
+        }
+      }
+
+      function scheduleBibImportRefresh(jobId, delay = 1200) {
+        if (!bibImportForm || !jobId) return;
+        if (bibImportTimer) window.clearTimeout(bibImportTimer);
+        bibImportTimer = window.setTimeout(() => {
+          refreshBibImport(jobId).catch((error) => {
+            console.error("Failed to refresh Bib import", error);
+            scheduleBibImportRefresh(jobId, 5000);
+          });
+        }, delay);
+      }
+
+      async function refreshBibImport(jobId) {
+        const response = await fetch(bibStatusUrl(jobId), { cache: "no-store" });
+        const snapshot = await response.json();
+        if (!response.ok) throw new Error(snapshot.message || "Bib 导入状态获取失败");
+        renderBibImport(snapshot);
+        if (snapshot.status === "queued" || snapshot.status === "running") {
+          scheduleBibImportRefresh(jobId, 1200);
+        } else {
+          refreshJobs().catch((error) => console.error("Failed to refresh jobs", error));
+        }
+      }
+
+      async function handleBibImport(event) {
+        if (!bibImportForm) return;
+        event.preventDefault();
+        const submitButton = document.getElementById("bib-import-submit");
+        const formData = new FormData(bibImportForm);
+        const file = formData.get("bib_file");
+        if (!file || !file.name) {
+          window.alert("请选择一个 .bib 文件。");
+          return;
+        }
+        if (submitButton) submitButton.disabled = true;
+        try {
+          const response = await fetch(bibImportForm.action, { method: "POST", body: formData });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.message || "Bib 导入启动失败");
+          renderBibImport(payload);
+          scheduleBibImportRefresh(payload.id, 300);
+        } catch (error) {
+          window.alert(error.message || "Bib 导入启动失败");
+        } finally {
+          if (submitButton) submitButton.disabled = false;
+        }
+      }
+
       if (dashboard) {
         renderJobs(initialData);
         scheduleJobRefresh((initialData.active_count || 0) > 0 ? 2500 : 12000);
@@ -1063,6 +1194,14 @@
         uploadForm.addEventListener("submit", (event) => {
           handleUploads(event).catch((error) => {
             console.error("Upload queue failed", error);
+          });
+        });
+      }
+
+      if (bibImportForm) {
+        bibImportForm.addEventListener("submit", (event) => {
+          handleBibImport(event).catch((error) => {
+            console.error("Bib import failed", error);
           });
         });
       }

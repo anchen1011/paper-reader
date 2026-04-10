@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from pypdf import PdfWriter
 
-from src.paper_reader.app import create_app, load_env_file_values, normalize_arxiv_id
+from src.paper_reader.app import create_app, load_env_file_values, normalize_arxiv_id, parse_arxiv_input
 from src.paper_reader.markdown_render import render_markdown
 
 
@@ -124,6 +124,17 @@ class PaperReaderAppTests(unittest.TestCase):
             enabled=True,
             auto_run=False,
         )
+
+    def wait_for_bib_import_job(self, job_id: str) -> dict[str, object]:
+        for _ in range(200):
+            response = self.client.get(f"/bib-import/status/{job_id}")
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertIsNotNone(payload)
+            if payload["status"] in {"completed", "failed"}:
+                return payload
+            time.sleep(0.02)
+        self.fail(f"Timed out waiting for Bib import job {job_id}")
 
     def test_login_required_for_index(self) -> None:
         client = self.app.test_client()
@@ -342,6 +353,12 @@ class PaperReaderAppTests(unittest.TestCase):
         self.assertEqual(normalize_arxiv_id("https://arxiv.org/abs/2501.12948"), "2501.12948")
         self.assertEqual(normalize_arxiv_id("https://arxiv.org/pdf/cs/0112017.pdf"), "cs/0112017")
 
+    def test_parse_arxiv_input_supports_newlines_and_commas(self) -> None:
+        self.assertEqual(
+            parse_arxiv_input("2501.12948\n2501.12949, cs/0112017；2501.12950"),
+            ["2501.12948", "2501.12949", "cs/0112017", "2501.12950"],
+        )
+
     def test_arxiv_download_route_saves_pdf_and_triggers_auto_prompts(self) -> None:
         pdf_bytes = self.make_pdf_bytes("Arxiv Download")
 
@@ -389,9 +406,163 @@ class PaperReaderAppTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        self.assertIn("检测到重复文件，已跳过：existing.pdf", html)
+        self.assertIn("检测到 1 篇重复论文，已自动跳过。", html)
         self.assertFalse((self.library / "incoming" / "2501.12948.pdf").exists())
         mocked_submit.assert_not_called()
+
+    def test_arxiv_download_route_supports_batch_ids(self) -> None:
+        pdf_one = self.make_pdf_bytes("Batch One")
+        pdf_two = self.make_pdf_bytes("Batch Two")
+
+        def fake_urlopen(request, timeout=45):
+            if request.full_url.endswith("2501.12948.pdf"):
+                return FakeUrlopenResponse(pdf_one)
+            if request.full_url.endswith("2501.12949.pdf"):
+                return FakeUrlopenResponse(pdf_two)
+            raise AssertionError(f"Unexpected URL: {request.full_url}")
+
+        with patch("src.paper_reader.app.urlopen", side_effect=fake_urlopen):
+            with patch.object(self.app.job_queue, "submit", return_value={"queued": 2, "existing": 0, "skipped": 0, "invalid": 0, "job_ids": [], "jobs": []}) as mocked_submit:
+                response = self.client.post(
+                    "/arxiv-download",
+                    data={
+                        "arxiv_ids": "2501.12948\n2501.12949,2501.12948",
+                        "target_folder": "batch",
+                        "folder": "batch",
+                        "q": "",
+                        "sort": "date_desc",
+                    },
+                    follow_redirects=True,
+                )
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("arXiv 下载完成：新增 2 篇论文。", html)
+        self.assertIn("输入中有 1 个重复 arXiv ID，已忽略。", html)
+        self.assertTrue((self.library / "batch" / "2501.12948.pdf").exists())
+        self.assertTrue((self.library / "batch" / "2501.12949.pdf").exists())
+        mocked_submit.assert_called_once_with(["batch/2501.12948.pdf", "batch/2501.12949.pdf"], ["core-zh"], force=False, source="arxiv")
+
+    def test_arxiv_download_route_reports_partial_failures(self) -> None:
+        pdf_bytes = self.make_pdf_bytes("Batch Success")
+
+        def fake_urlopen(request, timeout=45):
+            if request.full_url.endswith("2501.12948.pdf"):
+                return FakeUrlopenResponse(pdf_bytes)
+            raise RuntimeError("boom")
+
+        with patch("src.paper_reader.app.urlopen", side_effect=fake_urlopen):
+            with patch.object(self.app.job_queue, "submit", return_value={"queued": 1, "existing": 0, "skipped": 0, "invalid": 0, "job_ids": [], "jobs": []}) as mocked_submit:
+                response = self.client.post(
+                    "/arxiv-download",
+                    data={
+                        "arxiv_ids": "2501.12948\nnot-an-id\n2501.12949",
+                        "target_folder": "batch-errors",
+                        "folder": "batch-errors",
+                        "q": "",
+                        "sort": "date_desc",
+                    },
+                    follow_redirects=True,
+                )
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("arXiv 下载完成：新增 1 篇论文。", html)
+        self.assertIn("not-an-id: arXiv ID 格式不正确", html)
+        self.assertIn("2501.12949: boom", html)
+        self.assertTrue((self.library / "batch-errors" / "2501.12948.pdf").exists())
+        mocked_submit.assert_called_once_with(["batch-errors/2501.12948.pdf"], ["core-zh"], force=False, source="arxiv")
+
+    def test_bib_import_start_route_imports_entries_and_writes_unmatched_outputs(self) -> None:
+        bib_payload = b"""
+@misc{direct,
+  title = {Direct Arxiv Entry},
+  url = {https://arxiv.org/abs/2501.12948}
+}
+
+@misc{search,
+  title = {Search Match Entry}
+}
+
+@misc{missing,
+  title = {Missing Entry}
+}
+"""
+        pdf_direct = self.make_pdf_bytes("Direct Arxiv Entry")
+        pdf_search = self.make_pdf_bytes("Search Match Entry")
+
+        def fake_find(entry, timeout=20):
+            title = entry.get("title", "")
+            if title == "Direct Arxiv Entry":
+                return "2501.12948", "direct"
+            if title == "Search Match Entry":
+                return "2501.12949", "search"
+            return None, "未找到可信 arXiv 匹配。"
+
+        def fake_download(arxiv_id, timeout=45):
+            if arxiv_id == "2501.12948":
+                return pdf_direct
+            if arxiv_id == "2501.12949":
+                return pdf_search
+            raise AssertionError(f"Unexpected arxiv id {arxiv_id}")
+
+        with patch("src.paper_reader.app.bib_import_utils.find_arxiv_id_for_bib_entry", side_effect=fake_find):
+            with patch("src.paper_reader.app.download_arxiv_pdf", side_effect=fake_download):
+                with patch.object(self.app.job_queue, "submit", return_value={"queued": 2, "existing": 0, "skipped": 0, "invalid": 0, "job_ids": [], "jobs": []}) as mocked_submit:
+                    response = self.client.post(
+                        "/bib-import/start",
+                        data={
+                            "target_folder": "bib-imports",
+                            "bib_file": (io.BytesIO(bib_payload), "library.bib"),
+                        },
+                        content_type="multipart/form-data",
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    payload = response.get_json()
+                    self.assertIsNotNone(payload)
+                    job = self.wait_for_bib_import_job(payload["id"])
+
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["imported_count"], 2)
+        self.assertEqual(job["duplicate_count"], 0)
+        self.assertEqual(job["unmatched_count"], 1)
+        self.assertTrue((self.library / "bib-imports" / "2501.12948.pdf").exists())
+        self.assertTrue((self.library / "bib-imports" / "2501.12949.pdf").exists())
+        self.assertIsNotNone(job["unmatched_bib_rel_path"])
+        self.assertIsNotNone(job["unmatched_list_rel_path"])
+        unmatched_bib = self.library / str(job["unmatched_bib_rel_path"])
+        unmatched_list = self.library / str(job["unmatched_list_rel_path"])
+        self.assertIn("Missing Entry", unmatched_bib.read_text(encoding="utf-8"))
+        self.assertIn("Missing Entry", unmatched_list.read_text(encoding="utf-8"))
+        mocked_submit.assert_called_once_with(["bib-imports/2501.12948.pdf", "bib-imports/2501.12949.pdf"], ["core-zh"], force=False, source="bib-import")
+
+    def test_bib_import_start_route_rejects_second_active_job(self) -> None:
+        bib_payload = b"@misc{one, title={Entry One}}"
+        blocker = threading.Event()
+
+        def fake_find(entry, timeout=20):
+            blocker.wait(timeout=1)
+            return None, "未找到可信 arXiv 匹配。"
+
+        with patch("src.paper_reader.app.bib_import_utils.find_arxiv_id_for_bib_entry", side_effect=fake_find):
+            first = self.client.post(
+                "/bib-import/start",
+                data={"bib_file": (io.BytesIO(bib_payload), "library.bib")},
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(first.status_code, 200)
+            second = self.client.post(
+                "/bib-import/start",
+                data={"bib_file": (io.BytesIO(bib_payload), "library-2.bib")},
+                content_type="multipart/form-data",
+            )
+            blocker.set()
+            payload = first.get_json()
+            self.assertIsNotNone(payload)
+            self.wait_for_bib_import_job(payload["id"])
+
+        self.assertEqual(second.status_code, 409)
+        self.assertIn("当前已有一个 Bib 导入任务在运行", second.get_json()["message"])
 
     def test_prompt_save_route_creates_custom_prompt(self) -> None:
         response = self.client.post(
