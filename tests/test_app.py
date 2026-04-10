@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import tempfile
 import threading
@@ -12,7 +13,7 @@ from unittest.mock import patch
 
 from pypdf import PdfWriter
 
-from src.paper_reader.app import create_app, load_env_file_values, normalize_arxiv_id, parse_arxiv_input
+from src.paper_reader.app import create_app, load_env_file_values, normalize_arxiv_id, parse_arxiv_input, BibImportJobRecord
 from src.paper_reader.markdown_render import render_markdown
 
 
@@ -701,6 +702,53 @@ class PaperReaderAppTests(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertEqual(payload["id"], job["id"])
         self.assertEqual(payload["status"], "completed")
+
+    def test_bib_import_manager_marks_running_jobs_failed_after_restart(self) -> None:
+        now = "2026-04-10T12:00:00"
+        job_dir = self.library / ".paper-reader-bib-imports" / "restart-job"
+        job_dir.mkdir(parents=True, exist_ok=True)
+        status_path = job_dir / "status.json"
+        status_path.write_text(
+            json.dumps(
+                {
+                    "id": "restart-job",
+                    "source_name": "library.bib",
+                    "target_folder": "imports",
+                    "status": "running",
+                    "progress": 42,
+                    "message": "正在处理中",
+                    "error": None,
+                    "total_entries": 10,
+                    "processed_entries": 4,
+                    "imported_count": 2,
+                    "duplicate_count": 1,
+                    "unmatched_count": 1,
+                    "current_label": "Paper X",
+                    "source_bib_rel_path": ".paper-reader-bib-imports/restart-job/library.bib",
+                    "unmatched_bib_rel_path": None,
+                    "unmatched_list_rel_path": None,
+                    "imported_rel_paths": ["imports/a.pdf", "imports/b.pdf"],
+                    "duplicate_rel_paths": ["existing.pdf"],
+                    "auto_prompt_summary": {},
+                    "created_at": now,
+                    "updated_at": now,
+                    "started_at": now,
+                    "finished_at": None,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        manager = self.app.bib_import_manager.__class__(self.library)
+        job = manager.get_job("restart-job")
+        self.assertIsNotNone(job)
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(job.progress, 100)
+        self.assertEqual(job.error, "Interrupted by service restart")
+        self.assertEqual(job.message, "服务重启导致任务中断，请重新发起 Bib 导入。")
+        self.assertEqual(job.current_label, "")
+        self.assertIsNotNone(job.finished_at)
 
     def test_prompt_save_route_creates_custom_prompt(self) -> None:
         response = self.client.post(

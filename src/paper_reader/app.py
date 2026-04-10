@@ -1496,6 +1496,7 @@ def create_app(library_root: Path | None = None) -> Flask:
             self.job_root.mkdir(parents=True, exist_ok=True)
             self._lock = threading.Lock()
             self._jobs: dict[str, BibImportJobRecord] = {}
+            self._mark_interrupted_jobs_from_previous_run()
 
         def _timestamp(self) -> str:
             return datetime.utcnow().isoformat(timespec="seconds")
@@ -1562,6 +1563,31 @@ def create_app(library_root: Path | None = None) -> Flask:
                 return None
             self._jobs[job.id] = job
             return job
+
+        def _mark_interrupted_jobs_from_previous_run(self) -> None:
+            for path in self.job_root.glob("*/status.json"):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                job = self._coerce_job(payload)
+                if job is None or not job.id:
+                    continue
+                if job.status not in self.ACTIVE_STATUSES:
+                    continue
+                now = self._timestamp()
+                job.status = "failed"
+                job.progress = 100
+                job.error = "Interrupted by service restart"
+                job.message = "服务重启导致任务中断，请重新发起 Bib 导入。"
+                job.current_label = ""
+                job.finished_at = now
+                job.updated_at = now
+                with self._lock:
+                    self._jobs[job.id] = job
+                    self._persist_locked(job)
 
         def _update_job(self, job_id: str, **changes: Any) -> BibImportJobRecord | None:
             with self._lock:
