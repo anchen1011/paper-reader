@@ -1,0 +1,129 @@
+{% extends 'base.html' %}
+{% block title %}Sources - Paper Reader{% endblock %}
+{% block content %}
+<section class="sources-shell">
+  <div class="sources-head card">
+    <div>
+      <p class="eyebrow">Sources</p>
+      <h2>Paper Reader Source</h2>
+      <p class="sidebar-copy">这里会展示每天定时抓取的 Hugging Face Daily Papers，并允许你按天打包下载或一键导入到论文阅读器。</p>
+    </div>
+    <div class="sources-head-actions">
+      <a class="button-link secondary" href="{{ url_for('index') }}">返回主阅读器</a>
+    </div>
+  </div>
+
+  {% if source_groups %}
+    <div class="sources-index-grid">
+      {% for year_group in source_groups %}
+        <details class="source-year card" {% if loop.first %}open{% endif %}>
+          <summary>
+            <span>{{ year_group.label }}</span>
+            <small>{{ year_group.count }} 天</small>
+          </summary>
+          <div class="source-month-list">
+            {% for month_group in year_group.months %}
+              <details class="source-month" {% if loop.first and year_group.key == source_groups[0].key %}open{% endif %}>
+                <summary>
+                  <span>{{ month_group.label }}</span>
+                  <small>{{ month_group.count }} 天</small>
+                </summary>
+                <div class="source-day-list">
+                  {% for day in month_group.days %}
+                    <section class="source-day-card card">
+                      <div class="source-day-head">
+                        <div>
+                          <h3>{{ day.run_date }}</h3>
+                          <p>
+                            保存于北京时间 {{ day.saved_at_beijing or '未知' }}
+                            {% if day.snapshot_date %} · Hugging Face snapshot {{ day.snapshot_date }}{% endif %}
+                          </p>
+                        </div>
+                        <div class="source-day-metrics">
+                          <span>{{ day.paper_count }} 篇</span>
+                          <span>upvotes {{ day.filter_operator }} {{ day.filter_value }}</span>
+                        </div>
+                      </div>
+
+                      <form class="source-day-actions" action="{{ url_for('source_download_zip_route') }}" method="post">
+                        <input type="hidden" name="run_date" value="{{ day.run_date }}">
+                        <div class="tool-actions split-actions">
+                          <button type="submit">打包下载选中项</button>
+                          <button type="submit" formaction="{{ url_for('source_import_route') }}" class="secondary">导入到论文阅读器</button>
+                          <button type="button" class="button-link ghost source-select-toggle" data-day-form>本日全选 / 取消</button>
+                        </div>
+
+                        <div class="source-paper-list">
+                          {% for paper in day.papers %}
+                            <article class="source-paper-card">
+                              <label class="source-paper-check">
+                                <input type="checkbox" name="paper_ids" value="{{ paper.paper_id }}">
+                                <span>选择这篇</span>
+                              </label>
+                              <div class="source-paper-main">
+                                <div class="source-paper-top">
+                                  <div>
+                                    <h4>{{ paper.title }}</h4>
+                                    <p class="source-paper-id">{{ paper.paper_id }}</p>
+                                  </div>
+                                  <div class="source-paper-stats">
+                                    <span>👍 {{ paper.upvotes }}</span>
+                                    <span>💬 {{ paper.comment_count }}</span>
+                                  </div>
+                                </div>
+                                <p class="source-paper-authors">{{ paper.authors | join(', ') }}</p>
+                                <p class="source-paper-meta">
+                                  {% if paper.published_at %}<span>published {{ paper.published_at }}</span>{% endif %}
+                                  <span>{% if paper.pdf_exists %}PDF 已下载{% else %}PDF 缺失{% endif %}</span>
+                                  {% if paper.pdf_file_name %}<span>{{ paper.pdf_file_name }}</span>{% endif %}
+                                </p>
+                                <p class="source-paper-summary">{{ paper.summary }}</p>
+                                <div class="source-paper-links">
+                                  <a class="button-link secondary" href="{{ paper.url }}" target="_blank" rel="noreferrer">Hugging Face</a>
+                                  {% if paper.pdf_url %}
+                                    <a class="button-link secondary" href="{{ paper.pdf_url }}" target="_blank" rel="noreferrer">原始 PDF</a>
+                                  {% endif %}
+                                  {% if paper.pdf_exists %}
+                                    <a class="button-link secondary" href="{{ url_for('source_pdf_route', run_date=day.run_date, paper_id=paper.paper_id) }}" target="_blank" rel="noreferrer">本地 PDF</a>
+                                  {% endif %}
+                                </div>
+                              </div>
+                            </article>
+                          {% endfor %}
+                        </div>
+                      </form>
+                    </section>
+                  {% endfor %}
+                </div>
+              </details>
+            {% endfor %}
+          </div>
+        </details>
+      {% endfor %}
+    </div>
+  {% else %}
+    <section class="card viewer-empty">
+      <h3>还没有 Source 数据</h3>
+      <p>等定时服务首次运行后，这里就会按年 / 月 / 日展示 Daily Papers。</p>
+    </section>
+  {% endif %}
+</section>
+{% endblock %}
+{% block scripts %}
+  <script>
+    (() => {
+      document.querySelectorAll("[data-day-form]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const form = button.closest("form");
+          if (!form) return;
+          const checkboxes = Array.from(form.querySelectorAll('input[type="checkbox"][name="paper_ids"]'));
+          if (!checkboxes.length) return;
+          const shouldSelectAll = checkboxes.some((checkbox) => !checkbox.checked);
+          checkboxes.forEach((checkbox) => {
+            checkbox.checked = shouldSelectAll;
+          });
+        });
+      });
+    })();
+  </script>
+{% endblock %}

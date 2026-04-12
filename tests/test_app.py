@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import tempfile
 import threading
@@ -53,11 +54,13 @@ class PaperReaderAppTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.library = Path(self.tempdir.name)
+        self.source_tempdir = tempfile.TemporaryDirectory()
         self.env_file_path = self.library / ".test-no-env"
         self.env_patch = patch.dict(os.environ, {"PAPER_READER_ENV_FILE": str(self.env_file_path)}, clear=False)
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
-        self.app = create_app(self.library)
+        self.source_root = Path(self.source_tempdir.name)
+        self.app = create_app(self.library, source_archive_root=self.source_root)
         self.app.testing = True
         self.client = self.app.test_client()
         with self.client.session_transaction() as session:
@@ -74,6 +77,7 @@ class PaperReaderAppTests(unittest.TestCase):
                 time.sleep(0.01)
         except Exception:
             pass
+        self.source_tempdir.cleanup()
         self.tempdir.cleanup()
 
     def make_pdf(self, path: Path, title: str) -> None:
@@ -101,6 +105,45 @@ class PaperReaderAppTests(unittest.TestCase):
             enabled=True,
             auto_run=False,
         )
+
+    def create_source_day(self, run_date: str, paper_id: str = "2604.08377", title: str = "SkillClaw") -> Path:
+        year, month, day = run_date.split("-")
+        day_dir = self.source_root / year / month / day
+        pdf_dir = day_dir / "papers"
+        pdf_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = pdf_dir / f"{paper_id}.pdf"
+        self.make_pdf(pdf_path, title)
+        manifest = {
+            "run_reason": "startup",
+            "run_date_beijing": run_date,
+            "saved_at_beijing": f"{run_date}T18:30:00+08:00",
+            "saved_at_utc": f"{run_date}T10:30:00+00:00",
+            "schedule_timezone": "Asia/Shanghai",
+            "schedule_time_beijing": "18:30",
+            "source": "huggingface_daily_papers",
+            "source_url": "https://huggingface.co/papers",
+            "snapshot_date": run_date,
+            "filter": {"field": "upvotes", "operator": ">=", "value": 5},
+            "paper_count": 1,
+            "papers": [
+                {
+                    "paper_id": paper_id,
+                    "title": title,
+                    "url": f"https://huggingface.co/papers/{paper_id}",
+                    "upvotes": 12,
+                    "published_at": f"{run_date}T00:00:00.000Z",
+                    "authors": ["Alice", "Bob"],
+                    "summary": "A source archive test paper.",
+                    "comment_count": 2,
+                    "pdf_url": f"https://arxiv.org/pdf/{paper_id}.pdf",
+                    "pdf_rel_path": f"papers/{paper_id}.pdf",
+                    "pdf_file_name": f"{paper_id}.pdf",
+                    "pdf_downloaded": True,
+                }
+            ],
+        }
+        (day_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        return pdf_path
 
     def test_login_required_for_index(self) -> None:
         client = self.app.test_client()
@@ -995,6 +1038,67 @@ class PaperReaderAppTests(unittest.TestCase):
         self.assertIn("manual-added.pdf", names)
         with_done = self.app.library.scan(force=True, include_done=True)
         self.assertIn("manual-done.pdf", [paper.file_name for paper in with_done.papers])
+
+    def test_index_shows_sources_button_in_bottom_tools(self) -> None:
+        response = self.client.get("/")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("打开 Sources 页面", html)
+        self.assertIn("/sources", html)
+
+    def test_sources_page_lists_archived_day_and_paper(self) -> None:
+        self.create_source_day("2026-04-11", paper_id="2604.08377", title="SkillClaw")
+
+        response = self.client.get("/sources")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("2026-04-11", html)
+        self.assertIn("SkillClaw", html)
+        self.assertIn("2604.08377", html)
+        self.assertIn("打包下载选中项", html)
+        self.assertIn("导入到论文阅读器", html)
+
+    def test_sources_download_zip_packages_selected_papers(self) -> None:
+        self.create_source_day("2026-04-11", paper_id="2604.08377", title="SkillClaw")
+
+        response = self.client.post(
+            "/sources/download-zip",
+            data={"run_date": "2026-04-11", "paper_ids": ["2604.08377"]},
+        )
+        self.addCleanup(response.close)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "application/zip")
+        archive = zipfile.ZipFile(io.BytesIO(response.data))
+        names = set(archive.namelist())
+        self.assertIn("manifest.json", names)
+        self.assertTrue(any(name.endswith(".pdf") for name in names))
+
+    def test_sources_import_copies_pdf_into_library_and_submits_auto_prompts(self) -> None:
+        self.create_source_day("2026-04-11", paper_id="2604.08377", title="SkillClaw")
+
+        with patch.object(
+            self.app.job_queue,
+            "submit",
+            return_value={"queued": 1, "existing": 0, "skipped": 0, "invalid": 0, "job_ids": [], "jobs": []},
+        ) as mocked:
+            response = self.client.post(
+                "/sources/import",
+                data={"run_date": "2026-04-11", "paper_ids": ["2604.08377"]},
+                follow_redirects=True,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        imported = self.library / "Sources" / "HuggingFace" / "2026" / "04" / "11" / "2604.08377.pdf"
+        self.assertTrue(imported.exists())
+        mocked.assert_called_once_with(
+            ["Sources/HuggingFace/2026/04/11/2604.08377.pdf"],
+            ["core-zh"],
+            force=False,
+            source="source-import",
+        )
 
     def test_render_markdown_supports_rule_and_blockquote(self) -> None:
         rendered = render_markdown("# 标题\n\n> 引用内容\n\n---\n\n1. 第一项\n2. 第二项")

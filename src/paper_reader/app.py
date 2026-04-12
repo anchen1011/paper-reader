@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import string
 import tempfile
 import threading
 import time
@@ -25,6 +26,7 @@ from .markdown_render import render_markdown
 from .offline_package import build_offline_manifest, manifest_json as build_manifest_json, offline_prompt_arcname, offline_source_arcname
 from .prompt_manager import DEFAULT_PROMPT_SLUG, PromptDefinition, PromptStore, parse_checkbox
 from .settings import SettingsStore
+from .source_archive import day_paper_map, load_source_day, load_source_days, local_pdf_path_for
 from .task_queue import PaperJobQueue
 
 CACHE_FILE_NAME = ".paper_reader_index.json"
@@ -543,6 +545,40 @@ class PaperLibrary:
             counter += 1
         return candidate
 
+    def import_external_file(self, source_path: Path, target_folder: str, *, preferred_name: str | None = None) -> dict[str, Any]:
+        if not source_path.exists() or not source_path.is_file():
+            raise FileNotFoundError(str(source_path))
+
+        source_name = preferred_name or source_path.name
+        suffix = Path(source_name).suffix.lower()
+        if suffix not in ALLOWED_EXTENSIONS:
+            raise ValueError(f"Unsupported file type: {source_name}")
+
+        file_size = source_path.stat().st_size
+        file_hash = sha256_for_path(source_path)
+        duplicate_rel_path = self.find_duplicate_by_hash(file_size, file_hash)
+        if duplicate_rel_path:
+            return {
+                "status": "duplicate",
+                "message": f"检测到重复文件，已跳过：{Path(duplicate_rel_path).name}",
+                "saved_rel_path": None,
+                "duplicate_rel_path": duplicate_rel_path,
+            }
+
+        destination = self.make_unique_destination(target_folder, source_name)
+        shutil.copy2(source_path, destination)
+        rel_path = destination.relative_to(self.root).as_posix()
+        if self.is_done_rel_path(rel_path):
+            self._update_done_index_entry(rel_path)
+        else:
+            self._update_active_index_entry(rel_path)
+        return {
+            "status": "saved",
+            "message": f"导入成功：{destination.name}",
+            "saved_rel_path": rel_path,
+            "duplicate_rel_path": None,
+        }
+
     def is_done_rel_path(self, rel_path: str) -> bool:
         parts = Path(rel_path).parts
         return bool(parts) and parts[0] == DONE_DIR_NAME
@@ -865,6 +901,39 @@ def sha256_for_filestorage(file_storage: Any) -> tuple[int, str]:
     return total, digest.hexdigest()
 
 
+def safe_download_name(value: str, *, fallback: str) -> str:
+    allowed = f"-_.() {string.ascii_letters}{string.digits}"
+    cleaned = "".join(char if char in allowed else "_" for char in value).strip().rstrip(".")
+    return cleaned or fallback
+
+
+def build_source_groups(days: list[Any]) -> list[dict[str, Any]]:
+    tree: dict[str, dict[str, Any]] = {}
+    for day in days:
+        year_group = tree.setdefault(day.year, {"key": day.year, "label": day.year, "count": 0, "months": {}})
+        month_group = year_group["months"].setdefault(
+            day.month,
+            {"key": day.month, "label": f"{day.year}-{day.month}", "count": 0, "days": []},
+        )
+        year_group["count"] += 1
+        month_group["count"] += 1
+        month_group["days"].append(day)
+
+    groups: list[dict[str, Any]] = []
+    for year_key in sorted(tree.keys(), reverse=True):
+        year_group = tree[year_key]
+        months = [year_group["months"][month_key] for month_key in sorted(year_group["months"].keys(), reverse=True)]
+        groups.append(
+            {
+                "key": year_group["key"],
+                "label": year_group["label"],
+                "count": year_group["count"],
+                "months": months,
+            }
+        )
+    return groups
+
+
 
 def build_groups(papers: list[PaperRecord]) -> list[dict[str, Any]]:
     groups: dict[str, list[PaperRecord]] = {}
@@ -1074,9 +1143,10 @@ def redirect_to_index(
 
 
 
-def create_app(library_root: Path | None = None) -> Flask:
+def create_app(library_root: Path | None = None, source_archive_root: Path | None = None) -> Flask:
     base_dir = Path(__file__).resolve().parents[2]
     root = library_root or Path(base_dir / "docs" / "papers")
+    source_root = source_archive_root or Path(base_dir / "paper-reader-source" / "data" / "huggingface_daily")
     login_username, login_password = resolve_login_credentials(base_dir)
     app = Flask(
         __name__,
@@ -1085,6 +1155,7 @@ def create_app(library_root: Path | None = None) -> Flask:
     )
     app.config["SECRET_KEY"] = "paper-reader-dev-secret"
     app.config["LIBRARY_ROOT"] = root.resolve()
+    app.config["SOURCE_ARCHIVE_ROOT"] = source_root.resolve()
     app.config["LOGIN_USERNAME"] = login_username
     app.config["LOGIN_PASSWORD"] = login_password
     app.config["SESSION_COOKIE_HTTPONLY"] = True
@@ -1286,6 +1357,59 @@ def create_app(library_root: Path | None = None) -> Flask:
             flash(f"{result['skipped']} 个结果已存在，未重复提交。", "success")
         if result["invalid"]:
             flash(f"{result['invalid']} 个任务因 Prompt 缺失而未提交。", "error")
+
+    def selected_source_papers(day_record: Any, selected_ids: list[str]) -> list[Any]:
+        paper_map = day_paper_map(day_record)
+        normalized_ids = [paper_id.strip() for paper_id in selected_ids if paper_id.strip()]
+        if not normalized_ids:
+            return list(day_record.papers)
+        return [paper_map[paper_id] for paper_id in normalized_ids if paper_id in paper_map]
+
+    def import_source_day_papers(day_record: Any, papers: list[Any]) -> dict[str, Any]:
+        target_folder = f"Sources/HuggingFace/{day_record.year}/{day_record.month}/{day_record.day}"
+        saved_rel_paths: list[str] = []
+        duplicate_count = 0
+        error_messages: list[str] = []
+
+        for paper in papers:
+            source_pdf_path = local_pdf_path_for(day_record, paper)
+            if source_pdf_path is None or not source_pdf_path.exists():
+                error_messages.append(f"{paper.paper_id or paper.title} 缺少可用 PDF。")
+                continue
+            preferred_name = paper.pdf_file_name or f"{paper.paper_id}.pdf"
+            try:
+                result = app.library.import_external_file(  # type: ignore[attr-defined]
+                    source_pdf_path,
+                    target_folder,
+                    preferred_name=preferred_name,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                error_messages.append(f"{paper.paper_id or paper.title} 导入失败：{exc}")
+                continue
+
+            if result["status"] == "saved" and result["saved_rel_path"]:
+                saved_rel_paths.append(result["saved_rel_path"])
+            elif result["status"] == "duplicate":
+                duplicate_count += 1
+
+        submission = {"queued": 0, "existing": 0, "skipped": 0, "invalid": 0, "job_ids": [], "jobs": []}
+        if saved_rel_paths:
+            auto_prompts = app.prompt_store.auto_prompts()  # type: ignore[attr-defined]
+            if auto_prompts:
+                submission = app.job_queue.submit(  # type: ignore[attr-defined]
+                    saved_rel_paths,
+                    [prompt.slug for prompt in auto_prompts],
+                    force=False,
+                    source="source-import",
+                )
+
+        return {
+            "target_folder": target_folder,
+            "saved_rel_paths": saved_rel_paths,
+            "duplicate_count": duplicate_count,
+            "error_messages": error_messages,
+            "submission": submission,
+        }
 
     def build_batch_papers(
         *,
@@ -1861,6 +1985,95 @@ def create_app(library_root: Path | None = None) -> Flask:
         response = send_file(zip_path, as_attachment=True, download_name=package_name, mimetype="application/zip")
         response.call_on_close(lambda: zip_path.unlink(missing_ok=True))
         return response
+
+    @app.get("/sources")
+    def sources_index() -> Any:
+        source_root = Path(app.config["SOURCE_ARCHIVE_ROOT"])
+        day_records = load_source_days(source_root)
+        source_groups = build_source_groups(day_records)
+        return render_template(
+            "sources.html",
+            source_root=source_root,
+            source_groups=source_groups,
+            source_day_count=len(day_records),
+        )
+
+    @app.get("/sources/open/<run_date>/<paper_id>")
+    def source_pdf_route(run_date: str, paper_id: str) -> Any:
+        day_record = load_source_day(Path(app.config["SOURCE_ARCHIVE_ROOT"]), run_date)
+        if day_record is None:
+            abort(404)
+        paper = day_paper_map(day_record).get(paper_id)
+        if paper is None:
+            abort(404)
+        source_pdf_path = local_pdf_path_for(day_record, paper)
+        if source_pdf_path is None or not source_pdf_path.exists() or not source_pdf_path.is_file():
+            abort(404)
+        return send_file(source_pdf_path, as_attachment=False, download_name=paper.pdf_file_name or source_pdf_path.name)
+
+    @app.post("/sources/download-zip")
+    def source_download_zip_route() -> Any:
+        run_date = request.form.get("run_date", "").strip()
+        day_record = load_source_day(Path(app.config["SOURCE_ARCHIVE_ROOT"]), run_date)
+        if day_record is None:
+            flash("没有找到对应日期的 Source 数据。", "error")
+            return redirect(url_for("sources_index"))
+
+        selected_papers = selected_source_papers(day_record, request.form.getlist("paper_ids"))
+        valid_papers = []
+        for paper in selected_papers:
+            source_pdf_path = local_pdf_path_for(day_record, paper)
+            if source_pdf_path is None or not source_pdf_path.exists() or not source_pdf_path.is_file():
+                continue
+            valid_papers.append((paper, source_pdf_path))
+
+        if not valid_papers:
+            flash("当前选择中没有可打包的本地 PDF。", "error")
+            return redirect(url_for("sources_index"))
+
+        with tempfile.NamedTemporaryFile(prefix="paper-reader-source-", suffix=".zip", delete=False) as handle:
+            zip_path = Path(handle.name)
+
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(day_record.manifest_path, "manifest.json")
+            for index, (paper, source_pdf_path) in enumerate(valid_papers, start=1):
+                base_name = paper.pdf_file_name or f"{paper.paper_id}.pdf"
+                archive_name = safe_download_name(
+                    f"{index:02d}-{paper.paper_id}-{paper.title}.pdf",
+                    fallback=base_name,
+                )
+                archive.write(source_pdf_path, archive_name)
+
+        package_name = f"paper-reader-source-{day_record.run_date}.zip"
+        response = send_file(zip_path, as_attachment=True, download_name=package_name, mimetype="application/zip")
+        response.call_on_close(lambda: zip_path.unlink(missing_ok=True))
+        return response
+
+    @app.post("/sources/import")
+    def source_import_route() -> Any:
+        run_date = request.form.get("run_date", "").strip()
+        day_record = load_source_day(Path(app.config["SOURCE_ARCHIVE_ROOT"]), run_date)
+        if day_record is None:
+            flash("没有找到对应日期的 Source 数据。", "error")
+            return redirect(url_for("sources_index"))
+
+        selected = selected_source_papers(day_record, request.form.getlist("paper_ids"))
+        if not selected:
+            flash("请至少选择一篇论文。", "error")
+            return redirect(url_for("sources_index"))
+
+        summary = import_source_day_papers(day_record, selected)
+        if summary["saved_rel_paths"]:
+            flash(
+                f"已导入 {len(summary['saved_rel_paths'])} 篇论文到 `{summary['target_folder']}`。",
+                "success",
+            )
+            flash_submission_summary(summary["submission"], action_label="自动 Prompt 处理已转为后台任务")
+        if summary["duplicate_count"]:
+            flash(f"有 {summary['duplicate_count']} 篇论文已存在于阅读器中，已跳过。", "success")
+        for message in summary["error_messages"]:
+            flash(message, "error")
+        return redirect(url_for("sources_index"))
 
     @app.post("/ai-summary")
     def ai_summary_route() -> Any:
